@@ -1,59 +1,78 @@
 # unduplicator
 
-A bulletproof, resumable CLI tool that organizes files from a slow external HDD into a clean folder structure — with intelligent duplicate detection, full error resilience, and SQLite-backed progress tracking so interrupted runs pick up exactly where they left off.
+A resumable, copy-only CLI that imports files from removable drives into one destination. It keeps one SHA-256-identified copy of each unique file and tracks progress in SQLite.
 
-## destination
--- media files go into media folder
--- other files go to other folder
+## Import flow
 
-## media folder organisation
--- example /2022/2022-10/2022-10-31/file.jpg 
+```mermaid
+flowchart LR
+    L1["Laptop 1<br/>File1, File2, File3"]
+    L2["Laptop 2<br/>File1, File3, File4"]
+    HD["External HD<br/>File1, File9"]
+    D["New computer / destination<br/>File1, File2, File3, File4, File9"]
+    L1 --> D
+    L2 --> D
+    HD --> D
+```
 
-## other folder
--- goes just in there /
+Matching SHA-256 content is stored once, across all imports.
 
-## file classification
+## Import sequence
 
-### Supported formats
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant T as Tool
+    participant S as Source
+    participant D as Destination
 
-| Type   | Extensions |
-|--------|-----------|
-| media:Images | `.jpg` `.jpeg` `.png` `.heic` `.heif` `.gif` `.bmp` `.tiff` `.tif` `.webp` |
-| media:Videos | `.mp4` `.mov` `.avi` `.mkv` `.wmv` `.m4v` `.3gp` `.flv` |
-| other  | everything else → `/Other/` |
+    U->>T: Import Laptop 1
+    T->>S: Scan and analyze files
+    S-->>T: Metadata and candidate hashes
+    T->>D: Check the catalog for matching hashes
+    D-->>T: No prior matches
+    T->>S: Read new unique files
+    S-->>T: File1 File2 File3
+    T->>D: Copy files and store SHA256
+    T-->>U: Copied
 
+    U->>T: Later import Laptop 2
+    T->>S: Scan and analyze files
+    S-->>T: Candidate hashes
+    T->>D: Check the catalog for matching hashes
+    D-->>T: File1 and File3 already exist
+    T->>S: Read new unique files
+    S-->>T: File4
+    T->>D: Copy File4 and store SHA256
+    T-->>U: Skip duplicates and copy File4
 
-## Key features
+    opt Run optional verification
+        T->>D: Re-read files and compare stored hashes
+        D-->>T: Hash results
+        T-->>U: Verified if all hashes match
+    end
+```
 
-    Date-based folder structure — YYYY/YYYY-MM/YYYY-MM-DD/ using the actual capture date
-    Smart date extraction — reads EXIF/video metadata first, falls back to filename patterns, then file timestamps
-    Intelligent duplicate detection — three-tier strategy (size → partial hash → full SHA256) so only colliding files are hashed
-    Fully resumable
-    Copy-only — source files are never modified or deleted; the destination is built separately
-    Per-file error isolation — one bad file never stops the run; errors are recorded in     
-    Non-media files — anything not a recognized image or video goes to /Other/
-    Unknown dates (only for media) — files with no extractable date go to /Unknown/
+## Phases
 
-## How date extraction works
+1. **Scan** — record paths, sizes, extensions, and timestamps; do not read file content.
+2. **Analyze** — extract dates and hash same-size duplicate candidates.
+3. **Organize** — copy unique files and store their SHA-256 digests.
+4. **Verify (optional)** — re-read destination files and compare digests. Mark a run `verified` only if every digest matches.
 
-For each file, the following sources are tried in order — stopping at the first success:
+Keep source files unchanged during an import. The tool never moves or deletes them.
 
-| Priority | Source | Example |
-|----------|--------|---------|
-| 1 | EXIF `DateTimeOriginal` or `DateTimeDigitized` (images) | JPEG, HEIC, PNG |
-| 2 | Video container creation date | MP4, MOV |
-| 3 | Filename pattern | `IMG_20231015_143022.jpg`, `Screenshot_20231015-143022.png`, `2023-10-15 12.34.56.jpg` |
-| 4 | File system creation timestamp | if after 1990-01-01 |
-| 5 | File system last-modified timestamp | if after 1990-01-01 |
-| — | No date found | → placed in `/Unknown/` |
+## Destination
 
+- Media: `/Media/YYYY/YYYY-MM/YYYY-MM-DD/`
+- Media with unknown dates: `/Media/Unknown/`
+- Other files: `/Other/`
+- Different content with the same destination name: add a deterministic SHA-256 suffix; never overwrite.
 
-## Design decisions
+Date priority: image/video metadata, filename, filesystem timestamps, then `Unknown`. Filesystem timestamps may not be capture dates.
 
-**Why SQLite?** 100k+ files need durable, queryable state. In-memory state is lost on crash; a text log can't be queried. SQLite gives atomic writes, indexed lookups by status/hash/path, and requires no server setup. WAL mode allows the status command to read while a phase is writing.
+## Supported media
 
-**Why copy instead of move?** Copying is safe and idempotent. If something goes wrong — power failure, disk full, a bug — your source is completely untouched.
-
-**Why three-tier hashing?** On a slow spinning HDD, reading and hashing every file is prohibitively slow. Files with unique sizes are provably unique with zero reads. Only the minority of size-collision candidates need any I/O for deduplication.
-
-**Why three phases?** A single streaming pass would require reading content while walking directories and mixing concerns. Separating scan (directory entries only), analyze (date extraction + duplicate analysis with bounded hash parallelism), and organize (copying to final paths) keeps each phase resumable and tunable for different storage speeds.
+- Images: `.jpg` `.jpeg` `.png` `.heic` `.heif` `.gif` `.bmp` `.tiff` `.tif` `.webp`
+- Videos: `.mp4` `.mov` `.avi` `.mkv` `.wmv` `.m4v` `.3gp` `.flv`
+- Everything else goes to `/Other/`.

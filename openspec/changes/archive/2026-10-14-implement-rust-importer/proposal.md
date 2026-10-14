@@ -11,6 +11,7 @@ Unduplicator currently describes an import workflow but has no implementation. I
 - Organize media by date with deterministic naming and collision handling.
 - Publish destination files without overwrite and record completion only after durable finalization; reconcile interrupted work on resume.
 - Report durable file completion, byte progress, and phase-aware time estimates.
+- Persist and automatically print a text quick-check report after import, resume, and verification; provide read-only CLI commands to list runs and review saved reports.
 - Add unit, real-filesystem/SQLite integration, and controlled crash-recovery tests. Maintain `tests/README.md` describing actual tests, commands, fixtures, coverage, and limitations; distinguish executed results from planned coverage.
 
 ## Capabilities
@@ -20,7 +21,7 @@ Unduplicator currently describes an import workflow but has no implementation. I
 - `file-import`: Source inventory, bounded staging, content deduplication, HDD scheduling, and copy-only import.
 - `media-organization`: Media classification, date selection, and deterministic destination paths.
 - `import-recovery`: Durable publication, catalog state transitions, interruption recovery, and destination verification.
-- `import-progress`: CLI invocation, resumable run selection, progress reporting, and outcome reporting.
+- `import-progress`: CLI invocation, resumable run selection, progress and outcome reporting, persisted run reviews, and read-only run/report inspection.
 
 ### Modified Capabilities
 
@@ -28,4 +29,4 @@ None; the project has no existing capability specs.
 
 ## Impact
 
-Introduce a Cargo project, application modules, SQLite schema, automated tests, and test documentation. Dependencies will cover CLI parsing, SHA-256, SQLite, date parsing, and media metadata extraction. Filesystem durability support must be checked for the execution platform; unsupported guarantees must produce explicit errors. No existing application API or data migration is required. Source mutation, automatic catalog reconstruction, and detection of external source/destination changes remain outside scope as documented in the README.
+Introduce a Cargo project, application modules, SQLite schema, automated tests, and test documentation. Dependencies will cover CLI parsing, SHA-256, SQLite, date parsing, and media metadata extraction. Filesystem durability support must be checked for the execution platform; unsupported guarantees must produce explicit errors. The run-report extension adds schema version 2 and preserves version-1 data through an additive migration on import/resume/verify. Read-only inspection supports both versions without migration. Source mutation, automatic catalog reconstruction, and detection of external source/destination changes remain outside scope as documented in the README.

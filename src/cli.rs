@@ -41,6 +41,18 @@ pub enum Command {
         #[arg(long, value_parser = clap::value_parser!(i64).range(1..))]
         run: i64,
     },
+    /// List catalog runs and their saved report timestamps.
+    Runs {
+        #[arg(long)]
+        catalog: PathBuf,
+    },
+    /// Show the latest saved review for a run.
+    Report {
+        #[arg(long)]
+        catalog: PathBuf,
+        #[arg(long, value_parser = clap::value_parser!(i64).range(1..))]
+        run: i64,
+    },
 }
 
 fn positive_bytes(value: &str) -> Result<u64, String> {

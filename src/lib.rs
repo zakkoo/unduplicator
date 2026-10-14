@@ -10,5 +10,6 @@ pub mod pipeline;
 pub mod progress;
 pub mod publication;
 pub mod recovery;
+pub mod report;
 pub mod staging;
 pub mod verification;

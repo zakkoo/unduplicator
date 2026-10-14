@@ -28,6 +28,8 @@ Import, resume and verification workflow:
   --staging /ssd/staging --staging-budget 1073741824 --verify
 ./target/debug/unduplicator resume --catalog /ssd/catalog.sqlite --run 1 --verify
 ./target/debug/unduplicator verify --catalog /ssd/catalog.sqlite --run 1
+./target/debug/unduplicator runs --catalog /ssd/catalog.sqlite
+./target/debug/unduplicator report --catalog /ssd/catalog.sqlite --run 1
 ```
 
 The source must exist. Destination, staging, and the catalog must have disjoint
@@ -36,8 +38,8 @@ before checking; source symlinks will not be followed during inventory.
 Resume accepts only the catalog, positive run ID, and optional verification;
 it will reuse stored roots and budget.
 
-The catalog uses schema version 1, SQLite WAL with FULL synchronization, and an
-exclusive command lock. Concurrent commands and a different destination are
+The catalog uses schema version 2, SQLite WAL with FULL synchronization, and an
+exclusive import/resume/verify command lock. Concurrent write commands and a different destination are
 rejected. Retain the catalog and its lock file. Inventory records native Unix
 path bytes, original birth/modification times, extensions and sizes in batches
 of 256. Files in each directory are sorted by native name and recorded together
@@ -289,3 +291,45 @@ classification tests, which do not establish metadata coverage for every format.
 - Source contents, paths, and metadata remain unchanged throughout an import and any resumed work. The tool relies on this stability, including when oversized files are read twice; detecting external source changes is out of scope.
 - The destination is changed only by this tool, and the same destination is used across imports and resumes. Completed catalog entries are trusted. Detecting external edits, deletions, or replacement drives is out of scope.
 - The local SQLite catalog is retained. If it is lost, the import will be redone from the sources. Catalog backup and automatic reconstruction after catalog loss are out of scope.
+
+## Saved run reviews
+
+Import, resume, and verification automatically print a quick-check report and
+save that exact text in `run_reports(run, generated_at, report)`. There is one
+latest report per run; another resume or verification replaces it. Handled
+failures and interruptions also save and print a review, retaining exit 1 or
+130. Failures before a run can be opened/created and abrupt process termination
+cannot save a report.
+
+```sh
+# List runs, their phases, inventory totals, source paths and saved-report times.
+./target/debug/unduplicator runs --catalog /ssd/catalog.sqlite
+# Read the saved review, without rerunning the import or verification.
+./target/debug/unduplicator report --catalog /ssd/catalog.sqlite --run 1
+```
+
+Reviews contain roots and budget, inventoried/skipped files, source bytes,
+oversized-file counts, distinct content, within-source duplicate counts and
+redundant bytes, content referenced by earlier runs, completion and pending
+counts, extension and date-provenance breakdowns, current errors, and the latest
+verification pass/results. The ten largest within-source duplicate groups show
+up to ten source paths each and their destination mappings; omitted groups and
+paths are counted explicitly. All current stored file and latest verification
+errors are included. Paths and messages escape control characters for terminal
+review. Native non-UTF-8 paths are displayed lossily, as elsewhere in the CLI.
+
+The saved review also records elapsed seconds and source/destination/recovery/
+verification byte counters plus staging peak **for the last invocation**. These
+are not cumulative across resumes. Cross-run matches are references in this
+catalog, not a scan of arbitrary destination files or a historical count of
+files already present when the run began. Duplicate statistics for unfinished
+runs cover only hashed files; unfinished inventory counts are explicitly partial.
+
+`runs` and `report` open the database read-only and can run during an import.
+They do not require ExifTool, access to the original source, or the import lock.
+A saved review is a snapshot at its displayed timestamp, not a fresh filesystem
+check. If an old run or crashed run has no saved report, `report` renders the
+current catalog snapshot without persisting it. Version-1 catalogs migrate
+without losing existing records the next time import/resume/verify opens them;
+viewing alone does not migrate the database. Older version-1 binaries cannot
+open a migrated version-2 catalog.

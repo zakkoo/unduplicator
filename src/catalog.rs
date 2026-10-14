@@ -88,7 +88,7 @@ impl Catalog {
         let db = Connection::open(&path)?;
         let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
         ensure!(
-            version == 0 || version == 1,
+            (0..=2).contains(&version),
             "unsupported catalog schema version {version}"
         );
         db.execute_batch(
@@ -115,6 +115,14 @@ impl Catalog {
                     digest TEXT NOT NULL REFERENCES contents(digest), success INTEGER NOT NULL, error TEXT,
                     PRIMARY KEY(pass,digest));
                 PRAGMA user_version=1; COMMIT;")?;
+        }
+        if version < 2 {
+            db.execute_batch(
+                "BEGIN IMMEDIATE;
+                CREATE TABLE run_reports(run INTEGER PRIMARY KEY REFERENCES runs(id),
+                    generated_at TEXT NOT NULL, report TEXT NOT NULL);
+                PRAGMA user_version=2; COMMIT;",
+            )?;
         }
         db.execute_batch(
             "CREATE UNIQUE INDEX IF NOT EXISTS content_temporary ON contents(temporary);",

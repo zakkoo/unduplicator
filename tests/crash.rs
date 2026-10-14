@@ -111,6 +111,9 @@ fn every_crash_window_recovers_without_overwrite_or_duplicate_copy() {
         {
             let output = String::from_utf8_lossy(&resumed.stdout);
             let copied: u64 = output
+                .lines()
+                .find(|line| line.starts_with("complete:"))
+                .unwrap()
                 .rsplit("destination bytes ")
                 .next()
                 .unwrap()

@@ -56,3 +56,11 @@
 - [x] 8.1 Run an end-to-end multi-source collection import, interrupted resume, cross-import deduplication, and optional verification using real directories/catalogs; verify unique hashes, deterministic layouts, bounded staging, accurate outcomes, and unchanged sources together.
 - [x] 8.2 Run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test`; resolve failures and update tests/README.md with exact executed commands/results and remaining platform, media-fixture, and power-loss limitations.
 - [x] 8.3 Review every scenario in all four specs against implemented tests or explicit validation evidence and verify no required behavior is deferred or silently narrowed before marking this change complete.
+
+## 9. Persisted run reviews and inspection (implemented follow-up)
+
+- [x] 9.1 Add schema-version-2 `run_reports` storage and additive transactional version-1 migration; verify new schema, preserved existing rows, unsupported versions, and read-only legacy viewing without migration (`tests/catalog.rs`, `tests/report.rs`).
+- [x] 9.2 Implement report generation with catalog inventory/deduplication/completion/verification summaries, honest partial and cross-run semantics, bounded duplicate details, current errors, and last-invocation counters; verify actual same-source/cross-run arithmetic, mappings, partial counts and verification-failure results (`tests/report.rs`, `src/report.rs`).
+- [x] 9.3 Save and automatically print identical report text after import/resume/verify, refreshing only the selected run; verify stable prior-run snapshots, refreshed failed verification and subsequent resume, and saved reviews for failed copies/handled interruptions while retaining exit 1/130 (`tests/report.rs`, `tests/outcomes.rs`).
+- [x] 9.4 Add read-only `runs`/`report` CLI commands with positive IDs, unknown/missing/empty catalog handling, writer-lock coexistence and unsaved-snapshot fallback; verify CLI parsing and real catalog inspection (`tests/cli.rs`, `tests/report.rs`).
+- [x] 9.5 Document commands, stored-text semantics, snapshot/duplicate limits and migration compatibility in README.md/tests/README.md; reconcile proposal, design and import-progress spec with implementation; verify formatting, Clippy and full default/failpoint suites (36/38 tests passed), then validate OpenSpec strictly.

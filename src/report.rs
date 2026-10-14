@@ -1,0 +1,374 @@
+use crate::{
+    catalog::{Catalog, native_path},
+    pipeline::Counters,
+};
+use anyhow::{Context, Result, ensure};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
+use std::{fmt::Write, path::Path, sync::atomic::Ordering, time::Duration};
+
+fn bytes(value: i64) -> String {
+    let units = ["B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB"];
+    let mut scaled = value as f64;
+    let mut index = 0;
+    while scaled >= 1024.0 && index < units.len() - 1 {
+        scaled /= 1024.0;
+        index += 1;
+    }
+    format!("{scaled:.2} {} ({value} bytes)", units[index])
+}
+fn safe(value: &str) -> String {
+    value.escape_debug().to_string()
+}
+fn path(value: Vec<u8>) -> String {
+    safe(&native_path(value).to_string_lossy())
+}
+fn has_reports(db: &Connection) -> Result<bool> {
+    Ok(db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='run_reports')",
+        [],
+        |r| r.get(0),
+    )?)
+}
+fn reader(catalog: &Path) -> Result<Connection> {
+    let db = Connection::open_with_flags(catalog, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .with_context(|| format!("open catalog {}", catalog.display()))?;
+    db.busy_timeout(Duration::from_secs(5))?;
+    let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    ensure!(
+        (1..=2).contains(&version),
+        "unsupported catalog schema version {version}"
+    );
+    // Keep all queries in one consistent snapshot, including during an import.
+    db.execute_batch("BEGIN")?;
+    Ok(db)
+}
+
+pub fn list(catalog: &Path) -> Result<()> {
+    let db = reader(catalog)?;
+    let sql = if has_reports(&db)? {
+        "SELECT r.id,r.phase,r.total_files,r.total_bytes,r.source,p.generated_at FROM runs r LEFT JOIN run_reports p ON p.run=r.id ORDER BY r.id DESC"
+    } else {
+        "SELECT id,phase,total_files,total_bytes,source,NULL FROM runs ORDER BY id DESC"
+    };
+    let mut statement = db.prepare(sql)?;
+    let mut rows = statement.query([])?;
+    println!("RUN\tPHASE\tFILES\tBYTES\tREPORT SAVED (UTC)\tSOURCE");
+    let mut count = 0;
+    while let Some(row) = rows.next()? {
+        println!(
+            "{}\t{}\t{}\t{}\t{}\t{}",
+            row.get::<_, i64>(0)?,
+            safe(&row.get::<_, String>(1)?),
+            row.get::<_, Option<i64>>(2)?
+                .map_or_else(|| "?".into(), |v| v.to_string()),
+            row.get::<_, Option<i64>>(3)?
+                .map_or_else(|| "?".into(), |v| v.to_string()),
+            row.get::<_, Option<String>>(5)?
+                .unwrap_or_else(|| "none".into()),
+            path(row.get(4)?)
+        );
+        count += 1;
+    }
+    if count == 0 {
+        println!("No runs recorded.");
+    }
+    Ok(())
+}
+
+pub fn show(catalog: &Path, run: i64) -> Result<()> {
+    let db = reader(catalog)?;
+    if has_reports(&db)? {
+        let saved: Option<String> = db
+            .query_row("SELECT report FROM run_reports WHERE run=?1", [run], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        if let Some(saved) = saved {
+            print!("{saved}");
+            return Ok(());
+        }
+    }
+    // Older runs and abrupt process deaths have no saved review. Do not mutate
+    // their catalogs just to inspect them.
+    print!(
+        "No saved report; current catalog snapshot (not persisted).\n{}",
+        generate(&db, run)?
+    );
+    Ok(())
+}
+
+pub fn save(
+    catalog: &Catalog,
+    run: i64,
+    outcome: &str,
+    counters: &Counters,
+    elapsed: Duration,
+) -> Result<String> {
+    let generated = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let mut report = format!("Report saved: {generated}\nLast invocation: {outcome}\n");
+    report.push_str(&generate(&catalog.db, run)?);
+    writeln!(
+        report,
+        "\nLAST INVOCATION I/O (includes retries; resets on resume)"
+    )?;
+    writeln!(report, "  Elapsed: {:.2} seconds", elapsed.as_secs_f64())?;
+    for (label, value) in [
+        ("Source bytes read", counters.source.load(Ordering::Relaxed)),
+        (
+            "Destination bytes written",
+            counters.destination.load(Ordering::Relaxed),
+        ),
+        (
+            "Recovery bytes read",
+            counters.recovery.load(Ordering::Relaxed),
+        ),
+        (
+            "Verification bytes read",
+            counters.verification.load(Ordering::Relaxed),
+        ),
+        ("Staging peak", counters.stage_peak.load(Ordering::Relaxed)),
+    ] {
+        writeln!(report, "  {label}: {value} bytes")?;
+    }
+    catalog.db.execute(
+        "INSERT INTO run_reports(run,generated_at,report) VALUES(?1,?2,?3)
+        ON CONFLICT(run) DO UPDATE SET generated_at=excluded.generated_at,report=excluded.report",
+        params![run, generated, report],
+    )?;
+    Ok(report)
+}
+
+pub fn generate(db: &Connection, run: i64) -> Result<String> {
+    let mut report = String::new();
+    let mut statement = db.prepare("SELECT source,destination,staging,budget,phase,total_files,total_bytes,skipped_symlinks,skipped_special,error FROM runs WHERE id=?1")?;
+    let mut rows = statement.query([run])?;
+    let row = rows.next()?.with_context(|| format!("unknown run {run}"))?;
+    let phase: String = row.get(4)?;
+    let inventory_complete = phase != "inventory";
+    let total: Option<i64> = row.get(5)?;
+    writeln!(
+        report,
+        "UNDUPLICATOR — RUN QUICK CHECK\nRun: {run}\nRecorded phase: {}",
+        safe(&phase)
+    )?;
+    for (label, column) in [("Source", 0), ("Destination", 1), ("Staging", 2)] {
+        writeln!(report, "{label}: {}", path(row.get(column)?))?;
+    }
+    let budget: i64 = row.get(3)?;
+    writeln!(report, "Staging budget: {}", bytes(budget))?;
+    let run_error: Option<String> = row.get(9)?;
+    let (files, size, hashed, done, oversized, source_errors): (i64, i64, i64, i64, i64, i64) = db
+        .query_row(
+            "SELECT COUNT(*),COALESCE(SUM(s.size),0),COUNT(s.digest),
+        COALESCE(SUM(c.state='complete'),0),COALESCE(SUM(s.size>?2),0),COUNT(s.error)
+        FROM source_files s LEFT JOIN contents c ON s.digest=c.digest WHERE s.run=?1",
+            params![run, budget],
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
+            },
+        )?;
+    writeln!(
+        report,
+        "\nSOURCE INVENTORY\n  Inventory: {}\n  Regular files recorded: {files}\n  Recorded source size: {}",
+        if inventory_complete {
+            "complete"
+        } else {
+            "unfinished; counts below are partial"
+        },
+        bytes(size)
+    )?;
+    if inventory_complete {
+        writeln!(
+            report,
+            "  Skipped symlinks: {}\n  Skipped special files: {}",
+            row.get::<_, i64>(7)?,
+            row.get::<_, i64>(8)?
+        )?;
+    } else {
+        writeln!(
+            report,
+            "  Skipped entry totals: unavailable until inventory completes"
+        )?;
+    }
+    writeln!(report, "  Files larger than staging budget: {oversized}")?;
+    let (unique, unique_bytes, complete, pending, content_errors): (i64,i64,i64,i64,i64) = db.query_row(
+        "SELECT COUNT(*),COALESCE(SUM(size),0),COALESCE(SUM(state='complete'),0),COALESCE(SUM(state!='complete'),0),COUNT(error)
+        FROM contents WHERE digest IN (SELECT digest FROM source_files WHERE run=?1)", [run],
+        |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)))?;
+    let (groups, extra, redundant): (i64,i64,i64) = db.query_row(
+        "SELECT COUNT(*),COALESCE(SUM(n-1),0),COALESCE(SUM((n-1)*size),0) FROM
+        (SELECT COUNT(*) n,MAX(size) size FROM source_files WHERE run=?1 AND digest IS NOT NULL GROUP BY digest HAVING COUNT(*)>1)",
+        [run], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
+    let (shared, shared_bytes): (i64, i64) = db.query_row(
+        "SELECT COUNT(*),COALESCE(SUM(c.size),0) FROM contents c
+        WHERE c.digest IN (SELECT digest FROM source_files WHERE run=?1)
+        AND EXISTS(SELECT 1 FROM source_files p WHERE p.digest=c.digest AND p.run<?1)",
+        [run],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    writeln!(
+        report,
+        "\nCONTENT AND DUPLICATES\n  Source files with a digest: {hashed}/{files}\n  Distinct content groups: {unique}\n  Distinct content size: {}\n  Groups with multiple source files: {groups}\n  Extra copies within this source: {extra}\n  Redundant bytes within this source: {}\n  Distinct groups referenced by earlier runs: {shared} / {}\n  Distinct groups without earlier-run references: {} / {}\n  Duplicate counts cover hashed files only and can overlap cross-run matches.\n  Earlier-run references are catalog matches, not a destination scan or copy history.",
+        bytes(unique_bytes),
+        bytes(redundant),
+        bytes(shared_bytes),
+        unique - shared,
+        bytes(unique_bytes - shared_bytes)
+    )?;
+    writeln!(
+        report,
+        "\nCOMPLETION\n  Source files mapped to completed content: {done}/{files}\n  Required destination content complete: {complete}/{unique}\n  Pending destination content: {pending}\n  Source files without a digest: {}\n  Current source errors: {source_errors}\n  Current content errors: {content_errors}\n  Current run error: {}",
+        files - hashed,
+        run_error
+            .as_deref()
+            .map(safe)
+            .unwrap_or_else(|| "none".into())
+    )?;
+
+    writeln!(report, "\nSOURCE EXTENSIONS (counts include duplicates)")?;
+    let mut extensions = db.prepare("SELECT extension,COUNT(*),SUM(size) FROM source_files WHERE run=?1 GROUP BY extension ORDER BY COUNT(*) DESC,extension")?;
+    let mut ext_rows = extensions.query([run])?;
+    while let Some(ext) = ext_rows.next()? {
+        let extension = ext
+            .get::<_, Option<Vec<u8>>>(0)?
+            .map(path)
+            .unwrap_or_else(|| "(none)".into());
+        writeln!(
+            report,
+            "  {extension}: {} files / {}",
+            ext.get::<_, i64>(1)?,
+            bytes(ext.get(2)?)
+        )?;
+    }
+    writeln!(report, "\nDATE PROVENANCE (distinct content groups)")?;
+    let mut dates = db.prepare("SELECT provenance,COUNT(*) FROM contents WHERE digest IN (SELECT digest FROM source_files WHERE run=?1) GROUP BY provenance ORDER BY COUNT(*) DESC,provenance")?;
+    let mut date_rows = dates.query([run])?;
+    while let Some(date) = date_rows.next()? {
+        writeln!(
+            report,
+            "  {}: {}",
+            safe(&date.get::<_, String>(0)?),
+            date.get::<_, i64>(1)?
+        )?;
+    }
+
+    let latest: Option<(i64, String, i64)> = db
+        .query_row(
+            "SELECT id,state,bytes FROM verification_passes WHERE run=?1 ORDER BY id DESC LIMIT 1",
+            [run],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    writeln!(report, "\nLATEST VERIFICATION PASS")?;
+    let mut verified = false;
+    if let Some((pass, state, read)) = latest {
+        let (checked,passed,failed): (i64,i64,i64) = db.query_row("SELECT COUNT(*),COALESCE(SUM(success=1),0),COALESCE(SUM(success=0),0) FROM verification_results WHERE pass=?1",[pass],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
+        let missing: i64 = db.query_row("SELECT COUNT(*) FROM contents c WHERE c.digest IN (SELECT digest FROM source_files WHERE run=?1) AND NOT EXISTS(SELECT 1 FROM verification_results v WHERE v.pass=?2 AND v.digest=c.digest)",params![run,pass],|r|r.get(0))?;
+        writeln!(
+            report,
+            "  Pass ID: {pass}\n  State: {}\n  Destination files checked: {checked}\n  Passed: {passed}\n  Failed: {failed}\n  Required content without a result: {missing}\n  Recorded verification bytes: {}",
+            safe(&state),
+            bytes(read)
+        )?;
+        verified = state == "verified" && failed == 0 && missing == 0;
+        let mut errors = db.prepare("SELECT c.intended,v.error FROM verification_results v JOIN contents c ON c.digest=v.digest WHERE v.pass=?1 AND v.success=0 ORDER BY c.intended")?;
+        let mut error_rows = errors.query([pass])?;
+        while let Some(error) = error_rows.next()? {
+            writeln!(
+                report,
+                "  FAILURE {}: {}",
+                path(error.get(0)?),
+                safe(
+                    &error
+                        .get::<_, Option<String>>(1)?
+                        .unwrap_or_else(|| "unspecified".into())
+                )
+            )?;
+        }
+    } else {
+        writeln!(
+            report,
+            "  No verification pass recorded; destination bytes not independently checked."
+        )?;
+    }
+
+    writeln!(
+        report,
+        "\nLARGEST WITHIN-SOURCE DUPLICATE GROUPS (up to 10 groups, 10 paths each)"
+    )?;
+    let mut duplicates = db.prepare("SELECT s.digest,COUNT(*),MAX(s.size),c.intended FROM source_files s JOIN contents c ON c.digest=s.digest WHERE s.run=?1 GROUP BY s.digest HAVING COUNT(*)>1 ORDER BY (COUNT(*)-1)*MAX(s.size) DESC,s.digest LIMIT 10")?;
+    let mut dup_rows = duplicates.query([run])?;
+    while let Some(dup) = dup_rows.next()? {
+        let digest: String = dup.get(0)?;
+        let count: i64 = dup.get(1)?;
+        writeln!(
+            report,
+            "  SHA-256: {}\n  Copies: {count}; size each: {}\n  Destination: {}",
+            safe(&digest),
+            bytes(dup.get(2)?),
+            path(dup.get(3)?)
+        )?;
+        let mut paths = db.prepare("SELECT relative FROM source_files WHERE run=?1 AND digest=?2 ORDER BY sequence LIMIT 10")?;
+        let mut path_rows = paths.query(params![run, digest])?;
+        while let Some(source) = path_rows.next()? {
+            writeln!(report, "    {}", path(source.get(0)?))?;
+        }
+        if count > 10 {
+            writeln!(report, "    ... {} more source paths", count - 10)?;
+        }
+    }
+    if groups == 0 {
+        writeln!(report, "  None among hashed files.")?;
+    }
+    if groups > 10 {
+        writeln!(report, "  ... {} more duplicate groups", groups - 10)?;
+    }
+    if source_errors > 0 || content_errors > 0 {
+        writeln!(report, "\nCURRENT FILE ERRORS")?;
+        for sql in [
+            "SELECT relative,error FROM source_files WHERE run=?1 AND error IS NOT NULL ORDER BY sequence",
+            "SELECT intended,error FROM contents WHERE digest IN (SELECT digest FROM source_files WHERE run=?1) AND error IS NOT NULL ORDER BY intended",
+        ] {
+            let mut errors = db.prepare(sql)?;
+            let mut error_rows = errors.query([run])?;
+            while let Some(error) = error_rows.next()? {
+                writeln!(
+                    report,
+                    "  {}: {}",
+                    path(error.get(0)?),
+                    safe(&error.get::<_, String>(1)?)
+                )?;
+            }
+        }
+    }
+    writeln!(report, "\nCHECK RESULT")?;
+    if inventory_complete && total == Some(files) && done == files {
+        writeln!(
+            report,
+            "  Every inventoried source file maps to completed content."
+        )?;
+    } else {
+        writeln!(
+            report,
+            "  Import unfinished; inventory or destination work remains."
+        )?;
+    }
+    if verified {
+        writeln!(
+            report,
+            "  Latest verification passed for all required content at verification time."
+        )?;
+    }
+    writeln!(
+        report,
+        "  This is a catalog snapshot; it does not recheck current filesystem contents."
+    )?;
+    Ok(report)
+}

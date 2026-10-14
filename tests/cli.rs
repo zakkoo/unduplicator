@@ -22,11 +22,14 @@ fn accepts_all_commands_and_rejects_invalid_arguments() {
         ])
         .is_ok()
     );
-    for command in ["resume", "verify"] {
+    for command in ["resume", "verify", "report"] {
         assert!(Cli::try_parse_from(["u", command, "--catalog", "c", "--run", "1"]).is_ok());
     }
+    assert!(Cli::try_parse_from(["u", "runs", "--catalog", "c"]).is_ok());
     for args in [
         vec!["verify", "--catalog", "c", "--run", "0"],
+        vec!["report", "--catalog", "c", "--run", "0"],
+        vec!["report", "--catalog", "c"],
         vec!["resume", "--source", "s"],
         vec!["import"],
     ] {

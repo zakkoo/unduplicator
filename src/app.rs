@@ -5,7 +5,7 @@ use crate::{
     disk::Gates,
     inventory::inventory,
     pipeline::{self, Counters, Observer},
-    recovery, verification,
+    recovery, report, verification,
 };
 use anyhow::Result;
 use std::{
@@ -36,6 +36,11 @@ fn observer(stop: Arc<AtomicBool>) -> Observer {
 }
 
 pub fn execute(command: Command, stop: Arc<AtomicBool>) -> Result<()> {
+    match &command {
+        Command::Runs { catalog } => return report::list(catalog),
+        Command::Report { catalog, run } => return report::show(catalog, *run),
+        _ => {}
+    }
     crate::publication::platform_supported()?;
     let (mut catalog, config, run, verify, verification_only) = match command {
         Command::Import {
@@ -73,11 +78,13 @@ pub fn execute(command: Command, stop: Arc<AtomicBool>) -> Result<()> {
             println!("Run ID: {run}");
             (catalog, config, run, true, true)
         }
+        Command::Runs { .. } | Command::Report { .. } => unreachable!(),
     };
+    let started = std::time::Instant::now();
     let counters = Arc::new(Counters::default());
     let observer = observer(stop.clone());
     let gates = Gates::discover(&config.source, &config.destination, &config.staging);
-    let result = (|| {
+    let result: Result<()> = (|| {
         if !verification_only {
             inventory(&mut catalog, &config, run, &stop)?;
             let (symlinks, special): (i64, i64) = catalog.db.query_row(
@@ -126,6 +133,23 @@ pub fn execute(command: Command, stop: Arc<AtomicBool>) -> Result<()> {
             "{outcome} run {run}: {error:#}\nResume: unduplicator resume --catalog {} --run {run}",
             catalog.path.display()
         );
+    }
+    let outcome = if result.is_ok() {
+        "success"
+    } else if result.as_ref().err().is_some_and(|error| {
+        error
+            .downcast_ref::<pipeline::Shutdown>()
+            .map_or_else(|| stop.load(Ordering::Relaxed), |state| state.interrupted)
+    }) {
+        "interrupted"
+    } else {
+        "failed"
+    };
+    let review = report::save(&catalog, run, outcome, &counters, started.elapsed());
+    match review {
+        Ok(text) => print!("\n{text}"),
+        Err(error) if result.is_err() => eprintln!("could not save run report: {error:#}"),
+        Err(error) => return Err(error.context("could not save run report")),
     }
     result
 }

@@ -123,6 +123,22 @@ fn failed_copy_and_interruption_identify_resumable_work() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(stderr.contains("unfinished run 1"));
         assert!(stderr.contains("Resume:"));
+        let review = String::from_utf8_lossy(&output.stdout);
+        assert!(review.contains("UNDUPLICATOR — RUN QUICK CHECK"));
+        assert!(review.contains(if code == 130 {
+            "Last invocation: interrupted"
+        } else {
+            "Last invocation: failed"
+        }));
+        let report = Command::new(env!("CARGO_BIN_EXE_unduplicator"))
+            .arg("report")
+            .arg("--catalog")
+            .arg(temp.path().join("db"))
+            .args(["--run", "1"])
+            .output()
+            .unwrap();
+        assert!(report.status.success());
+        assert!(review.ends_with(String::from_utf8_lossy(&report.stdout).as_ref()));
         let resumed = Command::new(env!("CARGO_BIN_EXE_unduplicator"))
             .arg("resume")
             .arg("--catalog")

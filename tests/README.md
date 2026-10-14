@@ -177,3 +177,23 @@ An actual PTY verification invocation confirmed terminal line refresh and a
 successful verified summary; subprocess suites exercise redirected line output.
 
 Every scenario is mapped to validation evidence in [spec-coverage.md](spec-coverage.md).
+
+## Saved run reports
+
+```sh
+cargo test --locked --test report
+cargo test --locked --features test-failpoints
+cargo clippy --locked --all-targets --features test-failpoints -- -D warnings
+```
+
+Report integration tests use real CLI imports and SQLite to check within-source
+and cross-run duplicate arithmetic, destination mappings, identical printed and
+persisted text, stable prior-run snapshots, list/show commands while the writer
+lock is held, failed verification and subsequent resume, unknown run IDs,
+read-only legacy inspection, non-destructive version-1 to version-2 migration,
+partial inventories, empty catalogs, and missing catalogs without file creation.
+The outcome failpoint tests also check stored reviews on failed copies and
+handled interruptions, preserving exit statuses 1 and 130. Abrupt process-crash
+tests continue to exercise recovery; a process that exits without cleanup cannot
+save a final report, and report viewing uses a current read-only snapshot when
+no saved review exists.

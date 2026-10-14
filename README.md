@@ -4,6 +4,50 @@ A resumable, copy-only CLI that imports files from removable drives into one des
 
 ## Setup
 
+Build with Rust 1.85 or newer, Cargo, and a C compiler (bundled SQLite is built
+from source). Keep Cargo.lock to use the resolved dependency versions.
+ExifTool is required on PATH before a new import.
+
+On Omarchy:
+
+```sh
+omarchy pkg add base-devel rust perl-image-exiftool
+```
+
+```sh
+cargo build --locked
+cargo run --locked -- --help
+cargo run --locked -- import --help
+```
+
+Import, resume and verification workflow:
+
+```sh
+./target/debug/unduplicator import --source /mnt/source \
+  --destination /mnt/destination --catalog /ssd/catalog.sqlite \
+  --staging /ssd/staging --staging-budget 1073741824 --verify
+./target/debug/unduplicator resume --catalog /ssd/catalog.sqlite --run 1 --verify
+./target/debug/unduplicator verify --catalog /ssd/catalog.sqlite --run 1
+```
+
+The source must exist. Destination, staging, and the catalog must have disjoint
+paths, and none may overlap the source. Existing symlink ancestors are resolved
+before checking; source symlinks will not be followed during inventory.
+Resume accepts only the catalog, positive run ID, and optional verification;
+it will reuse stored roots and budget.
+
+The catalog uses schema version 1, SQLite WAL with FULL synchronization, and an
+exclusive command lock. Concurrent commands and a different destination are
+rejected. Retain the catalog and its lock file. Inventory records native Unix
+path bytes, original birth/modification times, extensions and sizes in batches
+of 256. Files in each directory are sorted by native name and recorded together
+before descending into sorted child directories. Inventory opens no file
+content. Symlinks and special files are counted separately and skipped;
+inaccessible directories or metadata leave inventory unfinished. A resumed
+unfinished inventory is discarded and rescanned; a finalized inventory is reused.
+Source completion is derived from committed content dependencies, so duplicates
+of a pending copy remain unfinished together.
+
 The tool is designed for a fast computer with two attached slow HDDs:
 
 - **Fast computer:** runs the CLI, hashing, and media metadata extraction.
@@ -95,11 +139,58 @@ The sequence diagram shows the dependencies for each file. During phase 2, the s
 
 ## Progress
 
+Output includes durable `done/total` source-file counts, source bytes read,
+destination bytes transferred against currently known unique content, recovery
+validation bytes, and approximate ETA. Source bytes include oversized unique
+copy rereads and representative-source validation during recovery. Destination
+bytes are session transfers, including retries; known unique bytes describe run
+dependencies and may include copies completed in earlier sessions/imports.
+Verification bytes are a separate counter and estimate. Staging peak includes
+recovered occupancy. Totals appear only after inventory is finalized; symlink
+and special-file skip counts are printed separately.
+
+Progress refreshes on terminals and prints periodic lines when redirected.
+Throughput is smoothed from byte samples; unseen unique demand is refined using
+the observed unique-byte fraction. ETA uses the larger remaining source/copy
+demand for independent disks and sums demands when serialized, including queued
+destination work and oversized rereads. Startup and zero-byte-only work show
+Estimating. Estimates are approximate, especially while the unique fraction is
+unknown or filesystem flushes dominate transfer time.
+
+`--verify` waits for the copy workers to drain, then rereads distinct required
+destination files in durable write order. Every requested pass starts fresh,
+even after an interrupted verification, and persists each digest result. A run
+is marked verified only after all required sizes and hashes match. Missing,
+unreadable or mismatched files produce verification-failed and an error exit.
+Successful import without verification is explicitly reported as unverified.
+
+Exit statuses: 0 for successful requested work; 1 for dependency, copy, catalog
+or verification failures; 2 for invalid invocation/root configuration; 130 for
+interruption. Failed/interrupted created runs print their run ID and resume
+command. Resume with `--verify` retries unfinished copies before a fresh pass.
+
 Show completed source files against the inventory total, such as `4 of 100000 done`, along with bytes read, destination copy progress, and an approximate time remaining. Count a source file as done only when its destination copy is durably complete; duplicates of pending content wait for that shared copy to complete.
 
 Estimate time from observed byte throughput and remaining source reads and destination writes, accounting for overlap between the disks and extra reads in the oversized-file fallback. File counts alone give poor estimates when file sizes vary. The amount of unique content is initially unknown, so refine the estimate as processing discovers duplicates and show `Estimating…` until enough work has completed. Include the remaining destination queue after source reading finishes. Optional verification has its own progress and estimate.
 
 ## HDD scheduling and staging
+
+The implementation uses one source worker, one destination worker and a SQLite
+coordinator. Each job channel holds at most 2 jobs and the event channel holds
+4 events. Byte reservations are also limited to 4 files, including empty files
+and oversized jobs. Normal files reserve their recorded size and are hashed
+while written to an exclusive stage using a 1 MiB buffer. Duplicate stages are
+removed immediately; unique stages and reservations remain until filesystem
+finalization and catalog commitment. Staging is tool-owned; do not put unrelated
+files in it or share it with another catalog.
+
+Linux topology discovery resolves block devices and partition parents through
+sysfs. Known separate source/destination devices permit overlap. Unknown,
+virtual or ambiguous topology is conservatively serialized. If staging shares
+a source/destination device, its access takes that device gate too. Oversized
+files reserve no staged bytes, hash once, and reread for copying only if unique;
+source metadata and fallback copying take the source gate. Failed work cancels
+reservations and disconnects bounded queues so workers can stop without deadlock.
 
 - Use one active content reader per physical source HDD and one active writer per physical destination HDD. Overlap work across the two disks, with hashing and metadata work on the fast computer.
 - Use large buffered transfers and bounded queues. Avoid interleaving several file streams on the same HDD or mixing destination verification with copying.
@@ -111,11 +202,48 @@ Estimate time from observed byte throughput and remaining source reads and desti
 
 ## Copy finalization and crash recovery
 
+The current publication adapter supports Linux. It publishes through an atomic
+same-filesystem hard link from the exclusive destination temporary file, then
+unlinks the temporary name. Existing final names are never replaced. Finished
+content is synced before publication; new directories and their parents are
+synced on creation, and final ancestors through the destination's parent are
+synced before catalog completion. Unsupported hard links or directory fsync,
+and failed file/directory/catalog operations, report errors and preserve pending
+work. Validated on this Linux host with real temporary-directory files; other
+platforms are explicitly rejected. Successful flush calls still depend on the
+filesystem/device honoring them. Operation-order and process-crash tests do not
+prove survival of actual power loss.
+
 1. Persist the pending digest, source reference, and intended destination path in SQLite before starting the destination copy.
 2. Write to a temporary file on the destination filesystem. Flush the completed file to durable storage, then atomically publish it at the final path without replacing an existing file. Flush the affected directory entries, including newly created parent directories, before proceeding.
 3. Durably commit the completed state in SQLite, then release the staging file. Duplicates linked to this content become complete only after this commit.
 
 On restart, reconcile pending records with destination files and staging files. If the final destination file already exists, check its digest before adopting it as complete; this handles a crash after publication but before the SQLite commit. Validate recovered staging or temporary content before reuse, and retry incomplete copies from valid staging or the unchanged source. Never overwrite a conflicting final file. Failed copies and their dependent duplicates remain unfinished and must be reported; the run is complete only when every inventoried file has a completed destination copy.
+
+Recovery drains existing pending work before allowing new staging reservations,
+including when recovered stages fill the budget. Matching finals are flushed and
+adopted without another copy. Complete temporaries are reused; partial temporaries
+are removed and retried from validated staging or a fully validated representative
+source. Leftover stages for committed rows are cleaned without recopying. Orphan
+cleanup removes only catalog-owned staging names or recorded redundant temporary
+paths; unknown/unrelated names and destination final paths are preserved.
+
+A small recovery trial:
+
+```sh
+mkdir -p /tmp/unduplicator-trial/source
+printf 'example\n' > /tmp/unduplicator-trial/source/example.txt
+./target/debug/unduplicator import --source /tmp/unduplicator-trial/source \
+  --destination /tmp/unduplicator-trial/destination \
+  --catalog /tmp/unduplicator-trial/catalog.sqlite \
+  --staging /tmp/unduplicator-trial/staging --staging-budget 1048576
+# After Ctrl-C or a failed copy, use the printed Run ID (for example 1):
+./target/debug/unduplicator resume --catalog /tmp/unduplicator-trial/catalog.sqlite --run 1
+```
+
+Automated child-process tests execute deterministic interruptions at seven
+publication windows and then run the same resume command shape. They validate
+process-crash recovery; they do not simulate physical power loss.
 
 ## Source safety
 
@@ -129,6 +257,26 @@ The tool never modifies, moves, or deletes source files.
 - Different content with the same destination name: add a deterministic SHA-256 suffix; never overwrite.
 
 Date priority: image/video metadata, filename, original source filesystem timestamps, then `Unknown`. Staging timestamps do not replace source timestamps. Filesystem timestamps may not be capture dates.
+
+ExifTool is invoked read-only on unique staged media; oversized media uses the
+original source. Valid EXIF DateTimeOriginal wins, then XMP DateCreated,
+QuickTime CreationDate, then embedded CreateDate. Filesystem tags returned by
+ExifTool are excluded. Missing, malformed or invalid metadata produces a
+diagnostic and permits fallback. Calendar dates retain their literal date even
+with offsets; no host timezone conversion occurs. Filename matching chooses
+the leftmost valid YYYY-MM-DD, YYYY_MM_DD or YYYYMMDD with numeric boundaries.
+Invalid dates and zero placeholders are rejected. Original birth time wins over
+modification time, both interpreted in UTC; neither usable means Unknown.
+
+The first inventory-ordered claimant represents each new digest; existing
+digests keep their representative, path, date and provenance. A reserved or
+existing basename receives `stem-FULL_LOWERCASE_SHA256.extension`. If that name
+also conflicts, the tool reports an error. Native Unix basenames are retained.
+Catalog reservations include temporary names. Temporary names receive a
+deterministic numeric suffix when needed so they never alias a reserved final
+name, including a source basename resembling the tool's temporary namespace.
+Real metadata fixtures currently cover JPEG and MP4; all listed extensions have
+classification tests, which do not establish metadata coverage for every format.
 
 ## Supported media
 

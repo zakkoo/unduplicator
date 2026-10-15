@@ -32,6 +32,7 @@ survival or of metadata parsing in every listed format.
 | Initial observations are insufficient | lib progress::startup_zero_bytes_verification_and_smoothing; outcomes::successful_import_verification_mismatch_and_invalid_invocation |
 | Import complete without verification | outcomes::successful_import_verification_mismatch_and_invalid_invocation |
 | Failure or interruption | outcomes::failed_copy_and_interruption_identify_resumable_work; outcomes::source_read_failure_and_concurrent_command_are_unsuccessful; pipeline::full_queues_failure_and_interruption_shutdown |
+| Prominent reconciled verdict | report::saved_reviews_cross_run_duplicates_read_only_commands_and_failed_verification; report::legacy_catalog_migration_and_unfinished_inventory_are_honest; report::verdict_distinguishes_unverified_skips_and_broken_inventory_totals |
 
 ## import-recovery
 

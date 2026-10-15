@@ -106,7 +106,7 @@ pub fn save(
 ) -> Result<String> {
     let generated = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     let mut report = format!("Report saved: {generated}\nLast invocation: {outcome}\n");
-    report.push_str(&generate(&catalog.db, run)?);
+    report.push_str(&generate_with_outcome(&catalog.db, run, Some(outcome))?);
     writeln!(
         report,
         "\nLAST INVOCATION I/O (includes retries; resets on resume)"
@@ -139,6 +139,10 @@ pub fn save(
 }
 
 pub fn generate(db: &Connection, run: i64) -> Result<String> {
+    generate_with_outcome(db, run, None)
+}
+
+fn generate_with_outcome(db: &Connection, run: i64, outcome: Option<&str>) -> Result<String> {
     let mut report = String::new();
     let mut statement = db.prepare("SELECT source,destination,staging,budget,phase,total_files,total_bytes,skipped_symlinks,skipped_special,error FROM runs WHERE id=?1")?;
     let mut rows = statement.query([run])?;
@@ -146,6 +150,9 @@ pub fn generate(db: &Connection, run: i64) -> Result<String> {
     let phase: String = row.get(4)?;
     let inventory_complete = phase != "inventory";
     let total: Option<i64> = row.get(5)?;
+    let total_bytes: Option<i64> = row.get(6)?;
+    let skipped_symlinks: i64 = row.get(7)?;
+    let skipped_special: i64 = row.get(8)?;
     writeln!(
         report,
         "UNDUPLICATOR — RUN QUICK CHECK\nRun: {run}\nRecorded phase: {}",
@@ -157,23 +164,32 @@ pub fn generate(db: &Connection, run: i64) -> Result<String> {
     let budget: i64 = row.get(3)?;
     writeln!(report, "Staging budget: {}", bytes(budget))?;
     let run_error: Option<String> = row.get(9)?;
-    let (files, size, hashed, done, oversized, source_errors): (i64, i64, i64, i64, i64, i64) = db
-        .query_row(
-            "SELECT COUNT(*),COALESCE(SUM(s.size),0),COUNT(s.digest),
+    let (files, size, hashed, hashed_size, done, oversized, source_errors): (
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+    ) = db.query_row(
+        "SELECT COUNT(*),COALESCE(SUM(s.size),0),COUNT(s.digest),
+        COALESCE(SUM(CASE WHEN s.digest IS NOT NULL THEN s.size ELSE 0 END),0),
         COALESCE(SUM(c.state='complete'),0),COALESCE(SUM(s.size>?2),0),COUNT(s.error)
         FROM source_files s LEFT JOIN contents c ON s.digest=c.digest WHERE s.run=?1",
-            params![run, budget],
-            |r| {
-                Ok((
-                    r.get(0)?,
-                    r.get(1)?,
-                    r.get(2)?,
-                    r.get(3)?,
-                    r.get(4)?,
-                    r.get(5)?,
-                ))
-            },
-        )?;
+        params![run, budget],
+        |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+            ))
+        },
+    )?;
     writeln!(
         report,
         "\nSOURCE INVENTORY\n  Inventory: {}\n  Regular files recorded: {files}\n  Recorded source size: {}",
@@ -188,8 +204,7 @@ pub fn generate(db: &Connection, run: i64) -> Result<String> {
         writeln!(
             report,
             "  Skipped symlinks: {}\n  Skipped special files: {}",
-            row.get::<_, i64>(7)?,
-            row.get::<_, i64>(8)?
+            skipped_symlinks, skipped_special
         )?;
     } else {
         writeln!(
@@ -268,6 +283,7 @@ pub fn generate(db: &Connection, run: i64) -> Result<String> {
         .optional()?;
     writeln!(report, "\nLATEST VERIFICATION PASS")?;
     let mut verified = false;
+    let mut verification_failed = false;
     if let Some((pass, state, read)) = latest {
         let (checked,passed,failed): (i64,i64,i64) = db.query_row("SELECT COUNT(*),COALESCE(SUM(success=1),0),COALESCE(SUM(success=0),0) FROM verification_results WHERE pass=?1",[pass],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
         let missing: i64 = db.query_row("SELECT COUNT(*) FROM contents c WHERE c.digest IN (SELECT digest FROM source_files WHERE run=?1) AND NOT EXISTS(SELECT 1 FROM verification_results v WHERE v.pass=?2 AND v.digest=c.digest)",params![run,pass],|r|r.get(0))?;
@@ -277,7 +293,12 @@ pub fn generate(db: &Connection, run: i64) -> Result<String> {
             safe(&state),
             bytes(read)
         )?;
-        verified = state == "verified" && failed == 0 && missing == 0;
+        verified = state == "verified"
+            && checked == unique
+            && passed == unique
+            && failed == 0
+            && missing == 0;
+        verification_failed = state == "failed" || failed > 0;
         let mut errors = db.prepare("SELECT c.intended,v.error FROM verification_results v JOIN contents c ON c.digest=v.digest WHERE v.pass=?1 AND v.success=0 ORDER BY c.intended")?;
         let mut error_rows = errors.query([pass])?;
         while let Some(error) = error_rows.next()? {
@@ -370,5 +391,63 @@ pub fn generate(db: &Connection, run: i64) -> Result<String> {
         report,
         "  This is a catalog snapshot; it does not recheck current filesystem contents."
     )?;
+    let mut failures = Vec::new();
+    let mut reviews = Vec::new();
+    if let Some(value) = outcome.filter(|value| *value != "success") {
+        failures.push(format!("Last invocation ended {value}."));
+    }
+    if run_error.is_some() || source_errors > 0 || content_errors > 0 {
+        failures.push("Current run or file errors are recorded.".into());
+    }
+    if phase == "verification-failed" || verification_failed {
+        failures.push("The latest destination verification failed.".into());
+    }
+    if inventory_complete && (total != Some(files) || total_bytes != Some(size)) {
+        failures.push("Inventory file or byte totals do not reconcile.".into());
+    }
+    if hashed != unique + extra
+        || unique != complete + pending
+        || hashed_size != unique_bytes + redundant
+    {
+        failures.push("Content group, source file, or source byte totals do not reconcile.".into());
+    }
+    if phase == "verified" && !verified {
+        failures.push("Verified phase lacks a complete passing verification pass.".into());
+    }
+    if !inventory_complete || hashed != files || done != files || pending != 0 {
+        if outcome == Some("success") {
+            failures
+                .push("Successful invocation has unfinished source or destination work.".into());
+        } else {
+            reviews.push("Inventory, hashing, or destination work remains unfinished.".into());
+        }
+    }
+    if !verified {
+        reviews.push("Destination content has no complete passing verification pass.".into());
+    } else if phase != "verified" {
+        reviews.push("Run is not currently recorded as verified; verify it again.".into());
+    }
+    if skipped_symlinks > 0 || skipped_special > 0 {
+        reviews.push(format!(
+            "Skipped entries need review: {skipped_symlinks} symlinks, {skipped_special} special files."
+        ));
+    }
+    let (verdict, reasons) = if !failures.is_empty() {
+        ("FAIL", failures)
+    } else if !reviews.is_empty() {
+        ("REVIEW", reviews)
+    } else {
+        (
+            "PASS",
+            vec!["Inventory, content, and destination verification reconcile.".into()],
+        )
+    };
+    let mut heading = format!(
+        "VERDICT: {verdict}\n  Source files: {done}/{files} complete; {hashed}/{files} hashed\n  Destination groups: {complete}/{unique} complete; {pending} pending\n  Source bytes: {hashed_size} hashed = {unique_bytes} distinct + {redundant} repeated\n"
+    );
+    for reason in reasons {
+        writeln!(heading, "  {reason}")?;
+    }
+    report.insert_str("UNDUPLICATOR — RUN QUICK CHECK\n".len(), &heading);
     Ok(report)
 }

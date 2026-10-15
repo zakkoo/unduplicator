@@ -74,6 +74,13 @@ After import/resume/verify returns on an opened or created run, the tool SHALL a
 ### Requirement: Quick-check report contents
 Reports SHALL summarize run configuration, inventory, hashed/distinct content, duplicates, completion, errors, extension/date provenance and latest verification. Persisted reviews SHALL include last-invocation outcome, elapsed seconds, source/destination/recovery/verification byte counters and staging peak, labeled as invocation values rather than cumulative values across resumes.
 
+#### Scenario: Prominent reconciled verdict
+- **WHEN** a review is generated for a run
+- **THEN** it shows PASS, REVIEW, or FAIL near the top with the reasons for that verdict
+- **AND** PASS requires reconciled inventory file/byte totals, reconciled content group/source byte totals, completed source and destination work, a currently verified phase with a complete passing latest verification pass, no current errors, and no skipped symlinks or special files
+- **AND** REVIEW identifies unverified or unfinished work and skipped entries when no failure condition is present
+- **AND** FAIL identifies a failed or interrupted invocation, current errors, failed verification, a claimed verified phase without a complete passing pass, inconsistent totals, or a successful invocation with unfinished work
+
 #### Scenario: Generate a comprehensive review
 - **WHEN** a review is generated for a recorded run
 - **THEN** it includes run ID, phase, source/destination/staging roots and byte budget, inventory completion, recorded file/byte totals, finalized skipped symlink/special-file counts and oversized-file count

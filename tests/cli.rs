@@ -61,6 +61,19 @@ fn accepts_all_commands_and_rejects_invalid_arguments() {
 }
 
 #[test]
+fn version_matches_package_version() {
+    let output = Command::new(env!("CARGO_BIN_EXE_unduplicator"))
+        .arg("--version")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        format!("unduplicator {}\n", env!("CARGO_PKG_VERSION"))
+    );
+}
+
+#[test]
 fn roots_and_missing_dependency_fail_before_execution() {
     let temp = tempfile::tempdir().unwrap();
     let source = temp.path().join("source");

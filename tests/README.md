@@ -13,7 +13,8 @@ cargo run --locked -- import --help
 cargo test --test cli
 ```
 
-CLI tests: 3 passed. They cover argument parsing, positive budgets/run IDs,
+CLI tests: 4 passed. They cover the package version reported by `--version`,
+argument parsing, positive budgets/run IDs,
 missing arguments, forbidden resume arguments, invalid invocation exit 2,
 missing ExifTool exit 1, normalized overlapping roots and symlink aliases.
 Validation failures create no catalog or destination.
@@ -118,7 +119,7 @@ without another transfer. Real-directory recovery tests additionally cover
 complete/partial temporaries, corrupt/missing stages, final conflicts, committed
 stages, orphan ownership and recovered budget saturation before new staging.
 
-The README recovery invocation is exercised by this suite with temporary paths
+The design notes recovery invocation is exercised by this suite with temporary paths
 and the actual printed run ID. Crash/error controls exist only in builds with
 the `test-failpoints` feature. Production builds ignore those environment variables.
 Process crashes and successful fsync calls are not evidence of power-loss survival.
@@ -167,7 +168,7 @@ Acceptance checks real JPEG/MP4 layouts, same-name collision suffixes, native Un
 names, oversized files, unchanged source paths/content/mtime, staged byte peak,
 full final digests, distinct dependencies and verified run states together.
 
-The README small-directory workflow was also executed using an isolated
+The design notes small-directory workflow was also executed using an isolated
 `/tmp/unduplicator-doc-trial.*` tree: import completed 1/1 with 8 source and
 destination bytes; resume with verification copied 0 bytes and verified 8 bytes;
 standalone verification reread 8 bytes. All three commands exited 0. The normal
@@ -192,6 +193,8 @@ persisted text, stable prior-run snapshots, list/show commands while the writer
 lock is held, failed verification and subsequent resume, unknown run IDs,
 read-only legacy inspection, non-destructive version-1 to version-2 migration,
 partial inventories, empty catalogs, and missing catalogs without file creation.
+Verdict tests cover passing verification, unverified imports, skipped symlinks,
+failed verification, unfinished inventory, and a corrupted inventory byte total.
 The outcome failpoint tests also check stored reviews on failed copies and
 handled interruptions, preserving exit statuses 1 and 130. Abrupt process-crash
 tests continue to exercise recovery; a process that exits without cleanup cannot

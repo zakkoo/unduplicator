@@ -57,6 +57,10 @@ fn saved_reviews_cross_run_duplicates_read_only_commands_and_failed_verification
     let db = rusqlite::Connection::open(&dbpath).unwrap();
     let first_report = stored(&db, 1);
     assert!(first.ends_with(&first_report));
+    assert!(first_report.contains("VERDICT: PASS"));
+    assert!(first_report.contains("Source files: 2/2 complete; 2/2 hashed"));
+    assert!(first_report.contains("Destination groups: 1/1 complete; 0 pending"));
+    assert!(first_report.contains("Source bytes: 8 hashed = 4 distinct + 4 repeated"));
     assert!(first_report.contains("Regular files recorded: 2"));
     assert!(first_report.contains("Extra copies within this source: 1"));
     assert!(first_report.contains("Redundant bytes within this source: 4.00 B (4 bytes)"));
@@ -72,6 +76,7 @@ fn saved_reviews_cross_run_duplicates_read_only_commands_and_failed_verification
     let second = text(&import(root, "second"));
     let second_report = stored(&db, 2);
     assert!(second.ends_with(&second_report));
+    assert!(second_report.contains("VERDICT: PASS"));
     assert!(second_report.contains("Distinct content groups: 2"));
     assert!(
         second_report.contains("Distinct groups referenced by earlier runs: 1 / 4.00 B (4 bytes)")
@@ -100,6 +105,7 @@ fn saved_reviews_cross_run_duplicates_read_only_commands_and_failed_verification
     assert_ne!(failed_report, second_report);
     assert!(String::from_utf8_lossy(&failure.stdout).ends_with(&failed_report));
     assert!(failed_report.contains("Last invocation: failed"));
+    assert!(failed_report.contains("VERDICT: FAIL"));
     assert!(failed_report.contains("Recorded phase: verification-failed"));
     assert!(failed_report.contains("Failed: 1"));
     assert!(failed_report.contains("mismatch"));
@@ -139,6 +145,7 @@ fn legacy_catalog_migration_and_unfinished_inventory_are_honest() {
     let legacy = text(&cli(&config.catalog, "report", Some(run)));
     assert!(legacy.contains("current catalog snapshot (not persisted)"));
     assert!(legacy.contains("Inventory: unfinished; counts below are partial"));
+    assert!(legacy.contains("VERDICT: REVIEW"));
     assert!(legacy.contains("Regular files recorded: 1"));
     assert!(legacy.contains("Source files without a digest: 1"));
     assert!(legacy.contains("Import unfinished"));
@@ -170,6 +177,48 @@ fn legacy_catalog_migration_and_unfinished_inventory_are_honest() {
             .unwrap();
     assert_eq!(stored(&cat.db, run), report);
     assert_eq!(text(&cli(&config.catalog, "report", Some(run))), report);
+}
+
+#[test]
+fn verdict_distinguishes_unverified_skips_and_broken_inventory_totals() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    std::fs::create_dir(root.join("source")).unwrap();
+    std::fs::write(root.join("source/file.txt"), b"content").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_unduplicator"))
+        .args(["import", "--source"])
+        .arg(root.join("source"))
+        .arg("--destination")
+        .arg(root.join("dest"))
+        .arg("--catalog")
+        .arg(root.join("db"))
+        .arg("--staging")
+        .arg(root.join("stage"))
+        .args(["--staging-budget", "100"])
+        .output()
+        .unwrap();
+    let initial = text(&output);
+    assert!(initial.contains("VERDICT: REVIEW"));
+    assert!(initial.contains("Destination content has no complete passing verification pass."));
+    let verified = text(&cli(&root.join("db"), "verify", Some(1)));
+    assert!(verified.contains("VERDICT: PASS"));
+    let resumed_without_verification = text(&cli(&root.join("db"), "resume", Some(1)));
+    assert!(resumed_without_verification.contains("VERDICT: REVIEW"));
+    assert!(resumed_without_verification.contains("Run is not currently recorded as verified"));
+
+    std::fs::create_dir(root.join("source_with_skip")).unwrap();
+    std::fs::write(root.join("source_with_skip/file.txt"), b"content").unwrap();
+    std::os::unix::fs::symlink("file.txt", root.join("source_with_skip/link.txt")).unwrap();
+    let skipped = text(&import(root, "source_with_skip"));
+    assert!(skipped.contains("VERDICT: REVIEW"));
+    assert!(skipped.contains("Skipped entries need review: 1 symlinks, 0 special files."));
+
+    let db = rusqlite::Connection::open(root.join("db")).unwrap();
+    db.execute("UPDATE runs SET total_bytes=total_bytes+1 WHERE id=1", [])
+        .unwrap();
+    let inconsistent = unduplicator::report::generate(&db, 1).unwrap();
+    assert!(inconsistent.contains("VERDICT: FAIL"));
+    assert!(inconsistent.contains("Inventory file or byte totals do not reconcile."));
 }
 
 #[test]

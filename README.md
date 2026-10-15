@@ -56,9 +56,26 @@ unduplicator import \
 
 The program prints a **Run ID**. Save it for the commands below. To import another source drive, run `import` again with that source and the same destination and catalog. The tool will reuse content already in the catalog.
 
+### How files are placed
+
+- **Identify:** Inventory the source and hash every file with SHA-256. Duplicate content reuses its stored copy, path, and date.
+- **Place:** Images and videos go under `Media/YYYY/YYYY-MM/YYYY-MM-DD/`; other files go under `Other/`. Name clashes get a hash suffix.
+- **Protect:** Source files stay untouched; existing destination files are never overwritten.
+
+For media, use the first valid date in this order:
+
+| Priority | Date source |
+| --- | --- |
+| 1 | Embedded EXIF capture, XMP creation, QuickTime creation, then other embedded creation dates. |
+| 2 | Date in the filename. |
+| 3 | Original source birth time, then modification time (UTC). |
+| 4 | No date: `Media/Unknown/`. |
+
+Staging file times are never used. Filesystem dates may differ from the capture date.
+
 ### Continue a run
 
-Use this after an interruption or a failed copy. Replace `1` with the printed Run ID.
+Use this after fixing the cause of an interruption or failed copy. Replace `1` with the printed Run ID.
 
 ```sh
 unduplicator resume --catalog /ssd/catalog.sqlite --run 1 --verify
@@ -74,7 +91,9 @@ unduplicator verify --catalog /ssd/catalog.sqlite --run 1
 
 ### Find a run and read its review
 
-`runs` is useful when you forgot a Run ID. `report` displays the saved review; it does **not** perform a new verification.
+- `runs` finds a forgotten Run ID.
+- `report --full` shows paths, current file errors, latest verification failures, date sources, and completion counts. It needs only the catalog, so you can inspect failures later.
+- Reports are snapshots, not fresh checks. Resume or verify replaces the previous report; after a crash without a saved report, `report` builds one from the catalog.
 
 ```sh
 unduplicator runs --catalog /ssd/catalog.sqlite
@@ -88,11 +107,15 @@ The default summary shows elapsed time, files found, destination content ready, 
 
 - **PASS:** The inventory and content counts reconcile, all inventoried files are complete, the latest destination verification passed, and no entries were skipped.
 - **REVIEW:** The run has no passing verification yet, work remains unfinished, or symlinks or special files were skipped. Read the reasons and decide whether those entries were expected.
-- **FAIL:** The run reported an error, destination verification failed, or recorded counts do not reconcile. Fix the cause and resume or verify again.
+- **FAIL:** The run reported an error, destination verification failed, or recorded counts do not reconcile. Read the full report and resolve the cause.
 
-The copied-file count and written bytes cover the last invocation only, so they reset on resume or verify. Older saved reports include written bytes but lack a copied-file count. Content groups without an earlier-run match are a run-level catalog comparison, not a copy history. The `--full` view gives paths, breakdowns, recorded phase, and reconciliation details.
+| Situation | Next step |
+| --- | --- |
+| Import or copy unfinished | Read `report --full`, fix the cause, then run `resume --verify`. |
+| Verification failed after copying | Restore the affected destination file to the expected content, then run `verify`. |
+| Files may have changed since the report | Run `verify` for a fresh destination check. |
 
-A report is a saved catalog snapshot. If files could have changed since its timestamp, run `verify` for a fresh check. A zero exit status means the requested command finished; exit status `1` means work or verification failed, `2` means invalid arguments or paths, and `130` means interruption.
+Exit status `1` means work or verification failed, `2` means invalid arguments or paths, and `130` means interruption.
 
 ## More detail
 

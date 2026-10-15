@@ -125,11 +125,11 @@ fn failed_copy_and_interruption_identify_resumable_work() {
         assert!(stderr.contains("Resume:"));
         let review = String::from_utf8_lossy(&output.stdout);
         assert!(review.contains("Run 1: FAIL"));
-        assert!(review.contains("Copied this invocation: 0 files"));
+        assert!(review.contains("Copied in last saved invocation: 0 files"));
         assert!(review.contains(if code == 130 {
-            "Last invocation: interrupted"
+            "Last saved invocation: interrupted"
         } else {
-            "Last invocation: failed"
+            "Last saved invocation: failed"
         }));
         let report = Command::new(env!("CARGO_BIN_EXE_unduplicator"))
             .arg("report")

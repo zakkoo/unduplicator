@@ -47,7 +47,7 @@ The CLI SHALL report complete, unfinished, or verification-failed outcomes with 
 - **THEN** the CLI exits unsuccessfully and identifies unfinished work and the run to resume
 
 ### Requirement: Persist and print run reviews
-After import/resume/verify returns on an opened or created run, the tool SHALL attempt to save a text review and UTC timestamp in `run_reports` and print the saved text by default. It SHALL keep one latest report per run, replacing it only on subsequent operations on that run. Handled failures/interruptions SHALL retain their original error and exit status; a report-save failure after successful work SHALL make the command fail explicitly.
+After import/resume/verify returns on an opened run, the tool SHALL attempt to atomically save a full review and UTC timestamp in `run_reports` and print its concise summary. It SHALL keep one latest saved review per run. Report persistence failure SHALL preserve committed work and any original failure status; otherwise successful work SHALL fail explicitly when its review cannot be saved.
 
 #### Scenario: No final reporting opportunity
 - **WHEN** an operation fails before its run can be opened/created or the process terminates abruptly
@@ -55,7 +55,7 @@ After import/resume/verify returns on an opened or created run, the tool SHALL a
 
 #### Scenario: Successful operation produces a review
 - **WHEN** import, resume, or verification finishes successfully
-- **THEN** the latest report is saved with a UTC timestamp and the same text is printed after the operation's progress and completion summary
+- **THEN** the latest full report is saved with a UTC timestamp and its concise summary is printed after the operation's progress and completion summary
 
 #### Scenario: Resume or verification refreshes a report
 - **WHEN** another operation on the same run finishes
@@ -72,14 +72,19 @@ After import/resume/verify returns on an opened or created run, the tool SHALL a
 - **AND** otherwise successful work returns unsuccessfully, while an existing work failure retains its original error and exit status
 
 ### Requirement: Quick-check report contents
-Reports SHALL summarize run configuration, inventory, hashed/distinct content, duplicates, completion, errors, extension/date provenance and latest verification. Persisted reviews SHALL include last-invocation outcome, elapsed seconds, source/destination/recovery/verification byte counters and staging peak, labeled as invocation values rather than cumulative values across resumes.
+Reports SHALL summarize configuration, inventory, hashed/distinct content, duplicates, completion, errors, extension/date provenance and latest verification. Completed unique files and bytes SHALL derive from committed content states and sizes across all resumes, counting each required digest once, including reused content. Reporting SHALL NOT add per-file writes or flushes. Historical invocation statistics SHALL NOT determine the current verdict.
 
 #### Scenario: Prominent reconciled verdict
 - **WHEN** a review is generated for a run
 - **THEN** it shows PASS, REVIEW, or FAIL near the top with the reasons for that verdict
 - **AND** PASS requires reconciled inventory file/byte totals, reconciled content group/source byte totals, completed source and destination work, a currently verified phase with a complete passing latest verification pass, no current errors, and no skipped symlinks or special files
 - **AND** REVIEW identifies unverified or unfinished work and skipped entries when no failure condition is present
-- **AND** FAIL identifies a failed or interrupted invocation, current errors, failed verification, a claimed verified phase without a complete passing pass, inconsistent totals, or a successful invocation with unfinished work
+- **AND** FAIL identifies current errors (including recorded failures or interruptions), failed verification, a claimed verified phase without a complete passing pass, inconsistent totals, or a completed phase with unfinished work
+
+#### Scenario: Resume after completion was committed but the report was not saved
+- **WHEN** a process crashes after committing destination completion and the run is resumed
+- **THEN** committed file counts and bytes remain exact without requiring the missing report
+- **AND** adopted final files and repeated resumes do not double-count content
 
 #### Scenario: Generate a comprehensive review
 - **WHEN** a review is generated for a recorded run
@@ -96,6 +101,12 @@ Reports SHALL summarize run configuration, inventory, hashed/distinct content, d
 #### Scenario: Latest verification contains failures
 - **WHEN** the latest verification pass contains a read failure or digest/size mismatch
 - **THEN** the report includes the failure counts and recorded error details without claiming that the latest verification passed
+
+#### Scenario: Saved invocation statistics are historical
+- **WHEN** a report includes saved invocation outcome, elapsed time, copied file count, source/destination/recovery/verification bytes or staging peak
+- **THEN** those values are labeled as belonging to the last saved invocation, including values recovered from older report formats
+- **AND** the report explains that these values are not cumulative and may predate current progress after a crash
+- **AND** missing saved text does not prevent current reporting or cause unavailable statistics to be invented
 
 #### Scenario: No verification pass exists
 - **WHEN** a run has no recorded verification pass
@@ -130,7 +141,7 @@ Duplicate statistics SHALL cover hashed files only and label cross-run matches a
 - **THEN** the report limits the detailed display and states the number of omitted groups or paths while retaining complete aggregate counts
 
 ### Requirement: Read-only run listing and report viewing
-The CLI SHALL provide `runs --catalog PATH` and `report --catalog PATH --run ID` with a positive report run ID. Inspection SHALL use a consistent read-only snapshot without acquiring the importer lock, accessing source/destination files, requiring ExifTool, migrating schemas or creating databases. Viewing SHALL print saved text verbatim, or a labeled current snapshot without persistence when no report exists. Missing/unsupported catalogs and unknown run IDs SHALL fail explicitly.
+The CLI SHALL provide `runs --catalog PATH` and `report --catalog PATH --run ID`. Inspection SHALL use a consistent read-only catalog snapshot without the importer lock, filesystem checks, ExifTool, schema migration or database creation. Reports SHALL generate current totals and verdict, with concise output by default and full details through `--full`. Saved text SHALL supply only historical invocation statistics. Missing/unsupported catalogs and unknown run IDs SHALL fail explicitly.
 
 #### Scenario: List catalog runs
 - **WHEN** a user invokes `runs --catalog PATH`
@@ -148,7 +159,12 @@ The CLI SHALL provide `runs --catalog PATH` and `report --catalog PATH --run ID`
 #### Scenario: Inspect a saved run while a writer holds the lock
 - **WHEN** a user lists runs or views a saved report while import/resume/verify holds the catalog lock
 - **THEN** inspection succeeds through a read-only snapshot without acquiring the writer lock
-- **AND** viewing returns the latest saved report rather than rerunning import or verification
+- **AND** viewing reflects committed catalog progress without rerunning import or verification
+
+#### Scenario: Saved verification verdict is stale after a crash
+- **WHEN** a saved review says PASS but a subsequent verification pass was interrupted
+- **THEN** the current report shows the incomplete latest pass and does not claim PASS
+- **AND** any older saved invocation statistics remain explicitly historical
 
 #### Scenario: An older or abruptly terminated run has no saved report
 - **WHEN** the requested run exists but has no saved review

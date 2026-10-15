@@ -33,6 +33,9 @@ survival or of metadata parsing in every listed format.
 | Import complete without verification | outcomes::successful_import_verification_mismatch_and_invalid_invocation |
 | Failure or interruption | outcomes::failed_copy_and_interruption_identify_resumable_work; outcomes::source_read_failure_and_concurrent_command_are_unsuccessful; pipeline::full_queues_failure_and_interruption_shutdown |
 | Prominent reconciled verdict | report::saved_reviews_cross_run_duplicates_read_only_commands_and_failed_verification; report::legacy_catalog_migration_and_unfinished_inventory_are_honest; report::verdict_distinguishes_unverified_skips_and_broken_inventory_totals |
+| Resume after completion was committed but the report was not saved | crash::every_crash_window_recovers_without_overwrite_or_duplicate_copy |
+| Saved verification verdict is stale after a crash | crash::crashes_during_verification_or_report_replacement_never_show_a_stale_verdict |
+| Missing or legacy saved statistics; report save failure | report::stale_legacy_and_missing_saved_text_do_not_control_current_totals_or_verdict; report::report_save_failure_preserves_completed_work_and_current_report |
 
 ## import-recovery
 

@@ -77,26 +77,46 @@ pub fn list(catalog: &Path) -> Result<()> {
 
 pub fn show(catalog: &Path, run: i64, full: bool) -> Result<()> {
     let db = reader(catalog)?;
+    // Completion and verdict always come from one current database snapshot.
+    // Saved text contributes only explicitly historical invocation statistics.
+    let mut detail = generate(&db, run)?;
+    let mut has_saved = false;
     if has_reports(&db)? {
-        let saved: Option<String> = db
-            .query_row("SELECT report FROM run_reports WHERE run=?1", [run], |r| {
-                r.get(0)
-            })
+        let saved: Option<(String, String)> = db
+            .query_row(
+                "SELECT generated_at,report FROM run_reports WHERE run=?1",
+                [run],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
             .optional()?;
-        if let Some(saved) = saved {
-            print!("{}", if full { saved } else { concise(&saved) });
-            return Ok(());
+        if let Some((generated, saved)) = saved {
+            has_saved = true;
+            if let Some((_, metrics)) = saved.split_once(METRICS_HEADING) {
+                detail.push_str(METRICS_HEADING);
+                detail.push_str(metrics);
+            } else if let Some((_, metrics)) = saved.split_once("\nLAST INVOCATION I/O") {
+                // Read older saved statistics without reusing their stale verdict.
+                detail.push_str(METRICS_HEADING);
+                writeln!(detail, "Invocation statistics saved: {generated}")?;
+                if let Some(outcome) = field(&saved, "Last invocation: ") {
+                    writeln!(detail, "Last saved invocation: {outcome}")?;
+                }
+                if let Some((_, values)) = metrics.split_once('\n') {
+                    detail.push_str(values);
+                }
+                detail.push_str(METRICS_NOTE);
+            }
         }
     }
-    // Older runs and abrupt process deaths have no saved review. Do not mutate
-    // their catalogs just to inspect them.
-    let detail = generate(&db, run)?;
-    print!(
-        "No saved report; current catalog snapshot (not persisted).\n{}",
-        if full { detail } else { concise(&detail) }
-    );
+    if !has_saved {
+        println!("No saved report; current catalog snapshot (not persisted).");
+    }
+    print!("{}", if full { detail } else { concise(&detail) });
     Ok(())
 }
+
+const METRICS_HEADING: &str = "\nLAST SAVED INVOCATION (performance statistics; not cumulative)\n";
+const METRICS_NOTE: &str = "  These statistics may predate current progress; abrupt termination can leave activity unrecorded.\n";
 
 pub fn save(
     catalog: &Catalog,
@@ -104,13 +124,14 @@ pub fn save(
     outcome: &str,
     counters: &Counters,
     elapsed: Duration,
+    observer: &crate::pipeline::Observer,
 ) -> Result<String> {
     let generated = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    let mut report = format!("Report saved: {generated}\nLast invocation: {outcome}\n");
-    report.push_str(&generate_with_outcome(&catalog.db, run, Some(outcome))?);
+    let mut report = generate(&catalog.db, run)?;
+    report.push_str(METRICS_HEADING);
     writeln!(
         report,
-        "\nLAST INVOCATION I/O (includes retries; resets on resume)"
+        "Invocation statistics saved: {generated}\nLast saved invocation: {outcome}"
     )?;
     writeln!(report, "  Elapsed: {:.2} seconds", elapsed.as_secs_f64())?;
     writeln!(
@@ -136,11 +157,16 @@ pub fn save(
     ] {
         writeln!(report, "  {label}: {value} bytes")?;
     }
-    catalog.db.execute(
+    report.push_str(METRICS_NOTE);
+    let tx = catalog.db.unchecked_transaction()?;
+    tx.execute(
         "INSERT INTO run_reports(run,generated_at,report) VALUES(?1,?2,?3)
         ON CONFLICT(run) DO UPDATE SET generated_at=excluded.generated_at,report=excluded.report",
         params![run, generated, report],
     )?;
+    observer("before_report_commit")?;
+    tx.commit()?;
+    observer("report_commit")?;
     Ok(concise(&report))
 }
 
@@ -170,8 +196,7 @@ fn files(n: i64) -> &'static str {
     if n == 1 { "file" } else { "files" }
 }
 
-/// Render only values recorded in the saved review, preserving its snapshot.
-/// This also works with reviews saved by earlier versions of the program.
+/// Render a concise view of generated or saved report text.
 pub fn concise(report: &str) -> String {
     let Some(verdict) = field(report, "VERDICT: ") else {
         return report.to_owned();
@@ -180,14 +205,18 @@ pub fn concise(report: &str) -> String {
         return report.to_owned();
     };
     let mut short = format!("Run {run}: {verdict}\n");
-    if let Some(value) = field(report, "Report saved: ") {
-        let _ = writeln!(short, "Saved: {value}");
+    if let Some(value) =
+        field(report, "Invocation statistics saved: ").or_else(|| field(report, "Report saved: "))
+    {
+        let _ = writeln!(short, "Invocation statistics saved: {value}");
     }
-    if let Some(value) = field(report, "Last invocation: ") {
-        let _ = writeln!(short, "Last invocation: {value}");
+    if let Some(value) =
+        field(report, "Last saved invocation: ").or_else(|| field(report, "Last invocation: "))
+    {
+        let _ = writeln!(short, "Last saved invocation: {value}");
     }
     if let Some(value) = field(report, "Elapsed: ") {
-        let _ = writeln!(short, "Time: {value} (last invocation)");
+        let _ = writeln!(short, "Time: {value} (last saved invocation)");
     }
     if let Some(found) = count(report, "Regular files recorded: ") {
         let size = amount(report, "Recorded source size: ").unwrap_or_else(|| "?".into());
@@ -211,6 +240,13 @@ pub fn concise(report: &str) -> String {
             );
         }
         short.push('\n');
+        if let Some(size) = amount(report, "Completed destination content size: ") {
+            let _ = writeln!(
+                short,
+                "Committed content: {ready} unique {}, {size} (across resumes; includes reused content)",
+                files(ready)
+            );
+        }
     }
     if let Some(extra) = count(report, "Extra copies within this source: ") {
         let redundant =
@@ -224,16 +260,19 @@ pub fn concise(report: &str) -> String {
         let written = count(report, "Destination bytes written: ").unwrap_or(0);
         let _ = writeln!(
             short,
-            "Copied this invocation: {copied} {}, {} written",
+            "Copied in last saved invocation: {copied} {}, {} written",
             files(copied),
             short_bytes(written)
         );
     } else if let Some(written) = count(report, "Destination bytes written: ") {
         let _ = writeln!(
             short,
-            "Written this invocation: {} (file count not recorded)",
+            "Written in last saved invocation: {} (file count not recorded)",
             short_bytes(written)
         );
+    }
+    if field(report, "Elapsed: ").is_some() {
+        short.push_str("Saved invocation statistics may predate current progress; crashes can leave activity unrecorded.\n");
     }
     if let Some(pending) = count(report, "Pending destination content: ") {
         if pending > 0 {
@@ -282,10 +321,6 @@ pub fn concise(report: &str) -> String {
 }
 
 pub fn generate(db: &Connection, run: i64) -> Result<String> {
-    generate_with_outcome(db, run, None)
-}
-
-fn generate_with_outcome(db: &Connection, run: i64, outcome: Option<&str>) -> Result<String> {
     let mut report = String::new();
     let mut statement = db.prepare("SELECT source,destination,staging,budget,phase,total_files,total_bytes,skipped_symlinks,skipped_special,error FROM runs WHERE id=?1")?;
     let mut rows = statement.query([run])?;
@@ -356,10 +391,12 @@ fn generate_with_outcome(db: &Connection, run: i64, outcome: Option<&str>) -> Re
         )?;
     }
     writeln!(report, "  Files larger than staging budget: {oversized}")?;
-    let (unique, unique_bytes, complete, pending, content_errors): (i64,i64,i64,i64,i64) = db.query_row(
-        "SELECT COUNT(*),COALESCE(SUM(size),0),COALESCE(SUM(state='complete'),0),COALESCE(SUM(state!='complete'),0),COUNT(error)
+    // Sizes and completion states are already committed together with progress.
+    // Derive totals here, without extra counters, writes, or per-file flushes.
+    let (unique, unique_bytes, complete, pending, content_errors, complete_bytes): (i64,i64,i64,i64,i64,i64) = db.query_row(
+        "SELECT COUNT(*),COALESCE(SUM(size),0),COALESCE(SUM(state='complete'),0),COALESCE(SUM(state!='complete'),0),COUNT(error),COALESCE(SUM(CASE WHEN state='complete' THEN size ELSE 0 END),0)
         FROM contents WHERE digest IN (SELECT digest FROM source_files WHERE run=?1)", [run],
-        |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)))?;
+        |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?)))?;
     let (groups, extra, redundant): (i64,i64,i64) = db.query_row(
         "SELECT COUNT(*),COALESCE(SUM(n-1),0),COALESCE(SUM((n-1)*size),0) FROM
         (SELECT COUNT(*) n,MAX(size) size FROM source_files WHERE run=?1 AND digest IS NOT NULL GROUP BY digest HAVING COUNT(*)>1)",
@@ -388,6 +425,12 @@ fn generate_with_outcome(db: &Connection, run: i64, outcome: Option<&str>) -> Re
             .as_deref()
             .map(safe)
             .unwrap_or_else(|| "none".into())
+    )?;
+
+    writeln!(
+        report,
+        "  Completed destination content size: {}\n  Completion totals span all resumes and include reused content; each digest is counted once.",
+        bytes(complete_bytes)
     )?;
 
     writeln!(report, "\nSOURCE EXTENSIONS (counts include duplicates)")?;
@@ -536,9 +579,6 @@ fn generate_with_outcome(db: &Connection, run: i64, outcome: Option<&str>) -> Re
     )?;
     let mut failures = Vec::new();
     let mut reviews = Vec::new();
-    if let Some(value) = outcome.filter(|value| *value != "success") {
-        failures.push(format!("Last invocation ended {value}."));
-    }
     if run_error.is_some() || source_errors > 0 || content_errors > 0 {
         failures.push("Current run or file errors are recorded.".into());
     }
@@ -558,9 +598,8 @@ fn generate_with_outcome(db: &Connection, run: i64, outcome: Option<&str>) -> Re
         failures.push("Verified phase lacks a complete passing verification pass.".into());
     }
     if !inventory_complete || hashed != files || done != files || pending != 0 {
-        if outcome == Some("success") {
-            failures
-                .push("Successful invocation has unfinished source or destination work.".into());
+        if matches!(phase.as_str(), "complete" | "verified") {
+            failures.push("Completed run has unfinished source or destination work.".into());
         } else {
             reviews.push("Inventory, hashing, or destination work remains unfinished.".into());
         }

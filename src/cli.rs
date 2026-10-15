@@ -46,13 +46,13 @@ pub enum Command {
         #[arg(long)]
         catalog: PathBuf,
     },
-    /// Show the latest saved review for a run.
+    /// Show current catalog progress and the last saved invocation statistics.
     Report {
         #[arg(long)]
         catalog: PathBuf,
         #[arg(long, value_parser = clap::value_parser!(i64).range(1..))]
         run: i64,
-        /// Show the complete saved report.
+        /// Show the complete report.
         #[arg(long)]
         full: bool,
     },

@@ -219,6 +219,10 @@ platforms are explicitly rejected. Successful flush calls still depend on the
 filesystem/device honoring them. Operation-order and process-crash tests do not
 prove survival of actual power loss.
 
+Catalog creation also flushes newly created parent directories and the catalog
+directory entry before accepting import work. These are startup operations;
+normal imports retain the existing transaction and flush frequency.
+
 1. Persist the pending digest, source reference, and intended destination path in SQLite before starting the destination copy.
 2. Write to a temporary file on the destination filesystem. Flush the completed file to durable storage, then atomically publish it at the final path without replacing an existing file. Flush the affected directory entries, including newly created parent directories, before proceeding.
 3. Durably commit the completed state in SQLite, then release the staging file. Duplicates linked to this content become complete only after this commit.
@@ -298,9 +302,11 @@ classification tests, which do not establish metadata coverage for every format.
 ## Saved run reviews
 
 Import, resume, and verification print a concise summary and save the complete
-review text in `run_reports(run, generated_at, report)`. `report` renders the
-same summary from the saved text, while `report --full` shows that text. There is one
-latest report per run; another resume or verification replaces it. Handled
+review text in `run_reports(run, generated_at, report)`. `report` always generates
+its verdict and work totals from a consistent current catalog snapshot;
+`report --full` shows all details. Saved text supplies only the explicitly labeled
+last saved invocation statistics. There is one latest saved report per run;
+another resume or verification replaces it atomically. Handled
 failures and interruptions also save and print a review, retaining exit 1 or
 130. Failures before a run can be opened/created and abrupt process termination
 cannot save a report.
@@ -308,12 +314,13 @@ cannot save a report.
 ```sh
 # List runs, their phases, inventory totals, source paths and saved-report times.
 ./target/debug/unduplicator runs --catalog /ssd/catalog.sqlite
-# Read the saved review, without rerunning the import or verification.
+# Read current catalog progress, without rerunning the import or verification.
 ./target/debug/unduplicator report --catalog /ssd/catalog.sqlite --run 1
 ```
 
 Summaries show a PASS / REVIEW / FAIL verdict with reasons, elapsed time, files
-found, destination content ready, files copied in the last invocation, duplicate
+found, destination content ready, committed unique files and bytes across resumes,
+files copied in the last saved invocation, duplicate
 source copies, and current errors. Older saved reviews lack a copied-file count;
 their summary shows written bytes and identifies the missing count. PASS requires a
 complete, reconciled inventory, completed content, a complete passing destination
@@ -329,18 +336,28 @@ paths are counted explicitly. All current stored file and latest verification
 errors are included. Paths and messages escape control characters for terminal
 review. Native non-UTF-8 paths are displayed lossily, as elsewhere in the CLI.
 
+Committed completion counts and bytes come directly from the existing content
+sizes and durably committed completion states. Each required digest is counted
+once, including content reused from earlier runs. A recovered final file counts
+when its completion is committed, and repeated resumes cannot double-count it.
+No additional per-file writes, flushes, counters, or schema migration are needed.
+
 The saved review also records elapsed seconds, files copied, source/destination/recovery/
-verification byte counters, and staging peak **for the last invocation**. These
-are not cumulative across resumes. Cross-run matches are references in this
+verification byte counters, and staging peak **for the last saved invocation**.
+These performance statistics include retries, are not cumulative across resumes,
+and can predate current progress if an invocation crashes before saving its review.
+They do not determine the current verdict or completion totals. Cross-run matches are references in this
 catalog, not a scan of arbitrary destination files or a historical count of
 files already present when the run began. Duplicate statistics for unfinished
 runs cover only hashed files; unfinished inventory counts are explicitly partial.
 
 `runs` and `report` open the database read-only and can run during an import.
 They do not require ExifTool, access to the original source, or the import lock.
-A saved review is a snapshot at its displayed timestamp, not a fresh filesystem
-check. If an old run or crashed run has no saved report, `report` renders the
-current catalog snapshot without persisting it. Version-1 catalogs migrate
+A report describes recorded catalog state, not a fresh filesystem check. An old
+saved PASS or FAIL cannot override newer catalog progress or verification results.
+If an old run or crashed run has no saved report, `report` still renders the
+current catalog snapshot without persisting it, omitting unavailable performance
+statistics. Version-1 catalogs migrate
 without losing existing records the next time import/resume/verify opens them;
 viewing alone does not migrate the database. Older version-1 binaries cannot
 open a migrated version-2 catalog.

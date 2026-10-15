@@ -41,7 +41,7 @@ pub fn sync_parents(parent: &Path, root: &Path) -> Result<()> {
     Ok(())
 }
 
-fn create_parents(parent: &Path, hook: &mut Hook<'_>) -> Result<()> {
+pub(crate) fn create_parents(parent: &Path, hook: &mut Hook<'_>) -> Result<()> {
     if parent.is_dir() {
         return Ok(());
     }
@@ -49,7 +49,7 @@ fn create_parents(parent: &Path, hook: &mut Hook<'_>) -> Result<()> {
         create_parents(ancestor, hook)?;
     }
     std::fs::create_dir(parent)
-        .with_context(|| format!("create destination directory {}", parent.display()))?;
+        .with_context(|| format!("create directory {}", parent.display()))?;
     sync_directory(parent)?;
     if let Some(ancestor) = parent.parent() {
         sync_directory(ancestor)?;

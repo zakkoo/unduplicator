@@ -145,7 +145,14 @@ pub fn execute(command: Command, stop: Arc<AtomicBool>) -> Result<()> {
     } else {
         "failed"
     };
-    let review = report::save(&catalog, run, outcome, &counters, started.elapsed());
+    let review = report::save(
+        &catalog,
+        run,
+        outcome,
+        &counters,
+        started.elapsed(),
+        &observer,
+    );
     match review {
         Ok(text) => print!("\n{text}"),
         Err(error) if result.is_err() => eprintln!("could not save run report: {error:#}"),

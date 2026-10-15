@@ -108,9 +108,10 @@ cargo test --test recovery
 cargo test --features test-failpoints --test crash
 ```
 
-2 recovery tests and 1 child-process test covering seven crash windows passed:
-after pending commit, partial transfer, file sync, publication, directory sync,
-catalog commit, and before stage cleanup. Inputs exceed one transfer buffer so
+Recovery tests and child-process tests cover twelve import crash windows:
+after pending commit, new directory sync, partial transfer, file sync, publication,
+directory sync, before and after catalog commit, before and after stage cleanup,
+and before and after report commit. Inputs exceed one transfer buffer so
 the partial-copy window is actually partial. Each child exits without stack
 destructors, reopens the same SQLite catalog, resumes its run, and checks full
 digests/sizes, persisted paths, duplicate done counts, existing destination
@@ -198,5 +199,20 @@ failed verification, unfinished inventory, and a corrupted inventory byte total.
 The outcome failpoint tests also check stored reviews on failed copies and
 handled interruptions, preserving exit statuses 1 and 130. Abrupt process-crash
 tests continue to exercise recovery; a process that exits without cleanup cannot
-save a final report, and report viewing uses a current read-only snapshot when
-no saved review exists.
+save a final report, and report viewing always uses a current read-only snapshot
+for work totals and verdict, whether or not saved text exists.
+
+## Crash-safe catalog reports
+
+Reports now always use a current catalog snapshot, including when saved text
+exists. Completion totals derive from committed content states and sizes without
+new accounting writes. The crash suite checks database integrity, live report
+counts/bytes before and after recovery, and repeated resumes without double
+counting. Five additional verification/report crash windows check atomic result
+and byte updates, stale saved PASS handling, and report replacement rollback.
+Imports exercise a newly created nested catalog directory.
+
+Report tests cover zero-byte files, reused content, historical performance
+statistics, legacy report text, missing cached text, and a failed report save
+that preserves completed work. Filesystem flush ordering is tested separately;
+these tests do not simulate a physical power cut or failing storage hardware.

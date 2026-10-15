@@ -71,7 +71,10 @@ fn saved_reviews_cross_run_duplicates_read_only_commands_and_failed_verification
     assert!(first.contains("Found: 2 files, 8.00 B"));
     assert!(first.contains("Destination: 1/1 unique files ready (1 without earlier-run matches, 0 seen in earlier runs)"));
     assert!(first.contains("Duplicates: 1 extra source copies, 4.00 B"));
-    assert!(first.contains("Copied this invocation: 1 file, 4.00 B written"));
+    assert!(first.contains(
+        "Committed content: 1 unique file, 4.00 B (across resumes; includes reused content)"
+    ));
+    assert!(first.contains("Copied in last saved invocation: 1 file, 4.00 B written"));
     assert!(first.contains("Failed: 0 source, 0 content, 0 verification"));
     assert!(!first.contains("SOURCE EXTENSIONS"));
     assert!(first_report.contains("VERDICT: PASS"));
@@ -94,11 +97,11 @@ fn saved_reviews_cross_run_duplicates_read_only_commands_and_failed_verification
     let second_report = stored(&db, 2);
     assert!(second.ends_with(&unduplicator::report::concise(&second_report)));
     assert!(second.contains("Destination: 2/2 unique files ready (1 without earlier-run matches, 1 seen in earlier runs)"));
-    assert!(second.contains("Copied this invocation: 1 file, 5.00 B written"));
+    assert!(second.contains("Copied in last saved invocation: 1 file, 5.00 B written"));
     let old_format = second_report.replace("  Destination files copied: 1\n", "");
     assert!(
         unduplicator::report::concise(&old_format)
-            .contains("Written this invocation: 5.00 B (file count not recorded)")
+            .contains("Written in last saved invocation: 5.00 B (file count not recorded)")
     );
     assert!(second_report.contains("VERDICT: PASS"));
     assert!(second_report.contains("Distinct content groups: 2"));
@@ -110,6 +113,7 @@ fn saved_reviews_cross_run_duplicates_read_only_commands_and_failed_verification
             .contains("Distinct groups without earlier-run references: 1 / 5.00 B (5 bytes)")
     );
     assert!(second_report.contains("Source files mapped to completed content: 3/3"));
+    assert!(second_report.contains("Completed destination content size: 9.00 B (9 bytes)"));
     assert!(second_report.contains("copy.txt"));
     assert!(second_report.contains("shared.txt"));
     assert_eq!(stored(&db, 1), first_report); // A saved review remains a snapshot.
@@ -139,13 +143,13 @@ fn saved_reviews_cross_run_duplicates_read_only_commands_and_failed_verification
         String::from_utf8_lossy(&failure.stdout)
             .ends_with(&unduplicator::report::concise(&failed_report))
     );
-    assert!(failed_report.contains("Last invocation: failed"));
+    assert!(failed_report.contains("Last saved invocation: failed"));
     assert!(failed_report.contains("VERDICT: FAIL"));
     assert!(failed_report.contains("Recorded phase: verification-failed"));
     assert!(failed_report.contains("Failed: 1"));
     assert!(
         unduplicator::report::concise(&failed_report)
-            .contains("Copied this invocation: 0 files, 0.00 B written")
+            .contains("Copied in last saved invocation: 0 files, 0.00 B written")
     );
     assert!(failed_report.contains("mismatch"));
     assert!(!failed_report.contains("Latest verification passed"));
@@ -155,7 +159,7 @@ fn saved_reviews_cross_run_duplicates_read_only_commands_and_failed_verification
     );
     assert_eq!(full(&dbpath, 2), failed_report);
     std::fs::write(root.join("dest/Other/a.txt"), b"same").unwrap();
-    assert!(text(&cli(&dbpath, "resume", Some(2))).contains("Last invocation: success"));
+    assert!(text(&cli(&dbpath, "resume", Some(2))).contains("Last saved invocation: success"));
     assert!(stored(&db, 2).contains("Recorded phase: complete"));
 }
 
@@ -214,9 +218,15 @@ fn legacy_catalog_migration_and_unfinished_inventory_are_honest() {
             .unwrap(),
         1
     );
-    let report =
-        unduplicator::report::save(&cat, run, "failed", &Default::default(), Default::default())
-            .unwrap();
+    let report = unduplicator::report::save(
+        &cat,
+        run,
+        "failed",
+        &Default::default(),
+        Default::default(),
+        &unduplicator::pipeline::noop(),
+    )
+    .unwrap();
     assert_eq!(unduplicator::report::concise(&stored(&cat.db, run)), report);
     assert_eq!(text(&cli(&config.catalog, "report", Some(run))), report);
 }
@@ -261,6 +271,64 @@ fn verdict_distinguishes_unverified_skips_and_broken_inventory_totals() {
     let inconsistent = unduplicator::report::generate(&db, 1).unwrap();
     assert!(inconsistent.contains("VERDICT: FAIL"));
     assert!(inconsistent.contains("Inventory file or byte totals do not reconcile."));
+    // A saved successful review must never hide a later catalog inconsistency.
+    assert!(text(&cli(&root.join("db"), "report", Some(1))).contains("Run 1: FAIL"));
+    assert!(full(&root.join("db"), 1).contains("Inventory file or byte totals do not reconcile."));
+}
+
+#[test]
+fn stale_legacy_and_missing_saved_text_do_not_control_current_totals_or_verdict() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    std::fs::create_dir(root.join("source")).unwrap();
+    std::fs::write(root.join("source/a"), b"same").unwrap();
+    std::fs::write(root.join("source/b"), b"same").unwrap();
+    std::fs::write(root.join("source/empty"), b"").unwrap();
+    text(&import(root, "source"));
+    let path = root.join("db");
+    let db = rusqlite::Connection::open(&path).unwrap();
+    let legacy = "Report saved: old\nLast invocation: failed\nVERDICT: FAIL\nRun: 1\nRequired destination content complete: 0/2\n\nLAST INVOCATION I/O (includes retries; resets on resume)\n  Elapsed: 12.00 seconds\n  Destination bytes written: 3 bytes\n";
+    db.execute(
+        "UPDATE run_reports SET generated_at='old',report=?1",
+        [legacy],
+    )
+    .unwrap();
+    let current = text(&cli(&path, "report", Some(1)));
+    assert!(current.contains("Run 1: PASS"));
+    assert!(current.contains("Committed content: 2 unique files, 4.00 B"));
+    assert!(current.contains("Last saved invocation: failed"));
+    assert!(current.contains("Written in last saved invocation: 3.00 B (file count not recorded)"));
+    assert!(current.contains("may predate current progress"));
+    assert!(!current.contains("Last invocation ended failed"));
+    assert_eq!(stored(&db, 1), legacy); // Inspection never rewrites the cache.
+    db.execute("DELETE FROM run_reports", []).unwrap();
+    let without_cache = text(&cli(&path, "report", Some(1)));
+    assert!(without_cache.contains("Run 1: PASS"));
+    assert!(without_cache.contains("Committed content: 2 unique files, 4.00 B"));
+    assert!(!without_cache.contains("Last saved invocation:"));
+    assert!(!without_cache.contains("Time:"));
+}
+
+#[test]
+fn report_save_failure_preserves_completed_work_and_current_report() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    std::fs::create_dir(root.join("source")).unwrap();
+    std::fs::write(root.join("source/a"), b"same").unwrap();
+    text(&import(root, "source"));
+    let path = root.join("db");
+    let db = rusqlite::Connection::open(&path).unwrap();
+    let saved = stored(&db, 1);
+    db.execute_batch("CREATE TRIGGER reject_report BEFORE INSERT ON run_reports BEGIN SELECT RAISE(FAIL, 'injected report save failure'); END;").unwrap();
+    let resumed = cli(&path, "resume", Some(1));
+    assert_eq!(resumed.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&resumed.stderr).contains("could not save run report"));
+    assert_eq!(stored(&db, 1), saved);
+    let current = text(&cli(&path, "report", Some(1)));
+    assert!(current.contains("Run 1: REVIEW"));
+    assert!(current.contains("Committed content: 1 unique file, 4.00 B"));
+    assert!(current.contains("Run is not currently recorded as verified"));
+    assert_eq!(std::fs::read(root.join("dest/Other/a")).unwrap(), b"same");
 }
 
 #[test]

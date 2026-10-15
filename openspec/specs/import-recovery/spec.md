@@ -6,6 +6,13 @@ Preserve resumable import progress through interruption and distinguish durable 
 
 ## Requirements
 
+### Requirement: Durable catalog creation
+Before accepting import work, catalog creation SHALL flush newly created parent directories and the catalog directory entry. Normal processing SHALL retain SQLite WAL and FULL synchronization without adding per-file accounting flushes.
+
+#### Scenario: Catalog path contains new directories
+- **WHEN** an import creates a catalog in a previously nonexistent directory tree
+- **THEN** each new directory and its parent, and the directory entry for the initialized catalog, are flushed before a run begins
+
 ### Requirement: Durable copy completion
 The tool SHALL persist pending digests, source references, and intended paths before copying. It SHALL flush destination temporary content, publish without replacement, and flush affected directory entries including newly created parents before durably committing completion in SQLite. Staging SHALL be released only after that commit.
 

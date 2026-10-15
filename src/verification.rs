@@ -72,6 +72,7 @@ pub fn verify(
             "UPDATE verification_passes SET bytes=?1 WHERE id=?2",
             params![counters.verification.load(Ordering::Relaxed) as i64, pass],
         )?;
+        observer("before_verification_result_commit")?;
         tx.commit()?;
         reporter.update(catalog, counters, false)?;
         observer("verification_result")?;
@@ -98,6 +99,7 @@ pub fn verify(
         ],
     )?;
     tx.commit()?;
+    observer("verification_complete")?;
     reporter.update(catalog, counters, true)?;
     ensure!(
         failed == 0,

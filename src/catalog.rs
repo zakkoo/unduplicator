@@ -74,7 +74,10 @@ impl Catalog {
             path.display()
         );
         if create {
-            std::fs::create_dir_all(path.parent().context("catalog has no parent")?)?;
+            crate::publication::create_parents(
+                path.parent().context("catalog has no parent")?,
+                &mut |_| Ok(()),
+            )?;
         }
         let mut lock_path = path.as_os_str().to_owned();
         lock_path.push(".lock");
@@ -127,6 +130,10 @@ impl Catalog {
         db.execute_batch(
             "CREATE UNIQUE INDEX IF NOT EXISTS content_temporary ON contents(temporary);",
         )?;
+        if create {
+            // Persist the catalog's directory entry before accepting import work.
+            crate::publication::sync_directory(path.parent().context("catalog has no parent")?)?;
+        }
         Ok(Self {
             db,
             path,

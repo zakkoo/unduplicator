@@ -17,7 +17,7 @@ From this repository, run:
 unduplicator --version
 ```
 
-The script runs the full test suite, builds a production release, and installs `unduplicator` in `~/.local/bin`. Run the same script again to update an existing installation. It replaces the installed binary only after testing and building succeed. If `~/.local/bin` is not in your `PATH`, the script tells you how to add it. The first version is `0.1.0`.
+The script runs the full test suite, builds a production release, and installs `unduplicator` in `~/.local/bin`. Run the same script again to update an existing installation. It replaces the installed binary only after testing and building succeed. If `~/.local/bin` is not in your `PATH`, the script tells you how to add it. The current version is `0.1.1`.
 
 ## Before importing
 
@@ -31,7 +31,7 @@ Keep the catalog and its `.lock` file on reliable storage. Put the source, desti
 | `resume` | Continue an interrupted or failed run using its saved settings; add `--verify` to check the result. |
 | `verify` | Start a fresh, full destination hash check for a completed run. |
 | `runs` | List run IDs, phases, source paths, and saved-report times. |
-| `report` | Show the last saved review for one run without reading the drives again. |
+| `report` | Show a short saved review; add `--full` for the detailed report. Neither reads the drives again. |
 | `--version` | Show the installed program version. |
 | `--help` | Show general help; use `import --help`, `resume --help`, and so on for options. |
 
@@ -79,17 +79,18 @@ unduplicator verify --catalog /ssd/catalog.sqlite --run 1
 ```sh
 unduplicator runs --catalog /ssd/catalog.sqlite
 unduplicator report --catalog /ssd/catalog.sqlite --run 1
+unduplicator report --catalog /ssd/catalog.sqlite --run 1 --full
 ```
 
 ## Reading the result
 
-Near the top of the final report, a verdict gives the result and its reasons:
+The default summary shows elapsed time, files found, destination content ready, files copied during the last invocation, source duplicates, current errors, and the verdict. A verdict gives the result and its reasons:
 
 - **PASS:** The inventory and content counts reconcile, all inventoried files are complete, the latest destination verification passed, and no entries were skipped.
 - **REVIEW:** The run has no passing verification yet, work remains unfinished, or symlinks or special files were skipped. Read the reasons and decide whether those entries were expected.
 - **FAIL:** The run reported an error, destination verification failed, or recorded counts do not reconcile. Fix the cause and resume or verify again.
 
-For a clean verified run, also expect `Last invocation: success`, `Recorded phase: verified`, source files mapped to completed content equal to regular files recorded, pending destination content `0`, and a latest verification pass with `Failed: 0` and `Required content without a result: 0`.
+The copied-file count and written bytes cover the last invocation only, so they reset on resume or verify. Older saved reports include written bytes but lack a copied-file count. Content groups without an earlier-run match are a run-level catalog comparison, not a copy history. The `--full` view gives paths, breakdowns, recorded phase, and reconciliation details.
 
 A report is a saved catalog snapshot. If files could have changed since its timestamp, run `verify` for a fresh check. A zero exit status means the requested command finished; exit status `1` means work or verification failed, `2` means invalid arguments or paths, and `130` means interruption.
 

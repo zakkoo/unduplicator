@@ -38,7 +38,7 @@ fn observer(stop: Arc<AtomicBool>) -> Observer {
 pub fn execute(command: Command, stop: Arc<AtomicBool>) -> Result<()> {
     match &command {
         Command::Runs { catalog } => return report::list(catalog),
-        Command::Report { catalog, run } => return report::show(catalog, *run),
+        Command::Report { catalog, run, full } => return report::show(catalog, *run, *full),
         _ => {}
     }
     crate::publication::platform_supported()?;

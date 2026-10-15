@@ -297,8 +297,9 @@ classification tests, which do not establish metadata coverage for every format.
 
 ## Saved run reviews
 
-Import, resume, and verification automatically print a quick-check report and
-save that exact text in `run_reports(run, generated_at, report)`. There is one
+Import, resume, and verification print a concise summary and save the complete
+review text in `run_reports(run, generated_at, report)`. `report` renders the
+same summary from the saved text, while `report --full` shows that text. There is one
 latest report per run; another resume or verification replaces it. Handled
 failures and interruptions also save and print a review, retaining exit 1 or
 130. Failures before a run can be opened/created and abrupt process termination
@@ -311,7 +312,10 @@ cannot save a report.
 ./target/debug/unduplicator report --catalog /ssd/catalog.sqlite --run 1
 ```
 
-Reviews show a PASS / REVIEW / FAIL verdict near the top, with reasons. PASS requires a
+Summaries show a PASS / REVIEW / FAIL verdict with reasons, elapsed time, files
+found, destination content ready, files copied in the last invocation, duplicate
+source copies, and current errors. Older saved reviews lack a copied-file count;
+their summary shows written bytes and identifies the missing count. PASS requires a
 complete, reconciled inventory, completed content, a complete passing destination
 verification, and no skipped entries. REVIEW covers unverified or unfinished
 work and skipped symlinks or special files. FAIL covers reported errors, failed
@@ -325,8 +329,8 @@ paths are counted explicitly. All current stored file and latest verification
 errors are included. Paths and messages escape control characters for terminal
 review. Native non-UTF-8 paths are displayed lossily, as elsewhere in the CLI.
 
-The saved review also records elapsed seconds and source/destination/recovery/
-verification byte counters plus staging peak **for the last invocation**. These
+The saved review also records elapsed seconds, files copied, source/destination/recovery/
+verification byte counters, and staging peak **for the last invocation**. These
 are not cumulative across resumes. Cross-run matches are references in this
 catalog, not a scan of arbitrary destination files or a historical count of
 files already present when the run began. Duplicate statistics for unfinished

@@ -94,8 +94,10 @@ fn validate_adopt_retry_conflict_and_completed_cleanup() {
             assert!(!orphan.exists());
             if ["final", "temporary", "completed"].contains(&scenario) {
                 assert_eq!(counters.destination.load(Ordering::Relaxed), 0);
+                assert_eq!(counters.copied_files.load(Ordering::Relaxed), 0);
             } else {
                 assert_eq!(counters.destination.load(Ordering::Relaxed), 7);
+                assert_eq!(counters.copied_files.load(Ordering::Relaxed), 1);
             }
             if ["corrupt_stage", "missing_stage"].contains(&scenario) {
                 assert_eq!(counters.source.load(Ordering::Relaxed), 14);

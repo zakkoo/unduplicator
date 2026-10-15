@@ -23,6 +23,7 @@ pub struct Counters {
     pub recovery: AtomicU64,
     pub source: AtomicU64,
     pub destination: AtomicU64,
+    pub copied_files: AtomicU64,
     pub verification: AtomicU64,
     pub observed: AtomicU64,
     pub unique: AtomicU64,
@@ -176,7 +177,12 @@ pub fn process(
                     result
                 });
                 let event = match result {
-                    Ok(()) => Event::Published(job.content),
+                    Ok(()) => {
+                        destination_counters
+                            .copied_files
+                            .fetch_add(1, Ordering::Relaxed);
+                        Event::Published(job.content)
+                    }
                     Err(error) => {
                         Event::Failed(None, Some(job.content.digest), format!("{error:#}"))
                     }

@@ -124,6 +124,7 @@ pub fn reconcile(
                         },
                     )
                 })?;
+                counters.copied_files.fetch_add(1, Ordering::Relaxed);
             }
             publication::commit(catalog, &content, &mut hook)
         })();

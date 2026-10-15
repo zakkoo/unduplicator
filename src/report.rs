@@ -75,7 +75,7 @@ pub fn list(catalog: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn show(catalog: &Path, run: i64) -> Result<()> {
+pub fn show(catalog: &Path, run: i64, full: bool) -> Result<()> {
     let db = reader(catalog)?;
     if has_reports(&db)? {
         let saved: Option<String> = db
@@ -84,15 +84,16 @@ pub fn show(catalog: &Path, run: i64) -> Result<()> {
             })
             .optional()?;
         if let Some(saved) = saved {
-            print!("{saved}");
+            print!("{}", if full { saved } else { concise(&saved) });
             return Ok(());
         }
     }
     // Older runs and abrupt process deaths have no saved review. Do not mutate
     // their catalogs just to inspect them.
+    let detail = generate(&db, run)?;
     print!(
         "No saved report; current catalog snapshot (not persisted).\n{}",
-        generate(&db, run)?
+        if full { detail } else { concise(&detail) }
     );
     Ok(())
 }
@@ -112,6 +113,11 @@ pub fn save(
         "\nLAST INVOCATION I/O (includes retries; resets on resume)"
     )?;
     writeln!(report, "  Elapsed: {:.2} seconds", elapsed.as_secs_f64())?;
+    writeln!(
+        report,
+        "  Destination files copied: {}",
+        counters.copied_files.load(Ordering::Relaxed)
+    )?;
     for (label, value) in [
         ("Source bytes read", counters.source.load(Ordering::Relaxed)),
         (
@@ -135,7 +141,144 @@ pub fn save(
         ON CONFLICT(run) DO UPDATE SET generated_at=excluded.generated_at,report=excluded.report",
         params![run, generated, report],
     )?;
-    Ok(report)
+    Ok(concise(&report))
+}
+
+fn field<'a>(report: &'a str, label: &str) -> Option<&'a str> {
+    report
+        .lines()
+        .map(str::trim_start)
+        .find_map(|line| line.strip_prefix(label))
+}
+
+fn count(report: &str, label: &str) -> Option<i64> {
+    field(report, label)?
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()
+}
+
+fn amount(report: &str, label: &str) -> Option<String> {
+    let value = field(report, label)?;
+    Some(value.split(" (").next()?.to_owned())
+}
+fn short_bytes(value: i64) -> String {
+    bytes(value).split(" (").next().unwrap_or("?").to_owned()
+}
+fn files(n: i64) -> &'static str {
+    if n == 1 { "file" } else { "files" }
+}
+
+/// Render only values recorded in the saved review, preserving its snapshot.
+/// This also works with reviews saved by earlier versions of the program.
+pub fn concise(report: &str) -> String {
+    let Some(verdict) = field(report, "VERDICT: ") else {
+        return report.to_owned();
+    };
+    let Some(run) = field(report, "Run: ") else {
+        return report.to_owned();
+    };
+    let mut short = format!("Run {run}: {verdict}\n");
+    if let Some(value) = field(report, "Report saved: ") {
+        let _ = writeln!(short, "Saved: {value}");
+    }
+    if let Some(value) = field(report, "Last invocation: ") {
+        let _ = writeln!(short, "Last invocation: {value}");
+    }
+    if let Some(value) = field(report, "Elapsed: ") {
+        let _ = writeln!(short, "Time: {value} (last invocation)");
+    }
+    if let Some(found) = count(report, "Regular files recorded: ") {
+        let size = amount(report, "Recorded source size: ").unwrap_or_else(|| "?".into());
+        let _ = writeln!(short, "Found: {found} {}, {size}", files(found));
+        if field(report, "Inventory: ").is_some_and(|value| value.starts_with("unfinished")) {
+            short.push_str("Inventory: unfinished; counts are partial\n");
+        }
+    }
+    if let (Some(ready), Some(total)) = (
+        field(report, "Required destination content complete: ")
+            .and_then(|s| s.split('/').next()?.parse::<i64>().ok()),
+        count(report, "Distinct content groups: "),
+    ) {
+        let new = count(report, "Distinct groups without earlier-run references: ");
+        let reused = count(report, "Distinct groups referenced by earlier runs: ");
+        let _ = write!(short, "Destination: {ready}/{total} unique files ready");
+        if let (Some(new), Some(reused)) = (new, reused) {
+            let _ = write!(
+                short,
+                " ({new} without earlier-run matches, {reused} seen in earlier runs)"
+            );
+        }
+        short.push('\n');
+    }
+    if let Some(extra) = count(report, "Extra copies within this source: ") {
+        let redundant =
+            amount(report, "Redundant bytes within this source: ").unwrap_or_else(|| "?".into());
+        let _ = writeln!(
+            short,
+            "Duplicates: {extra} extra source copies, {redundant}"
+        );
+    }
+    if let Some(copied) = count(report, "Destination files copied: ") {
+        let written = count(report, "Destination bytes written: ").unwrap_or(0);
+        let _ = writeln!(
+            short,
+            "Copied this invocation: {copied} {}, {} written",
+            files(copied),
+            short_bytes(written)
+        );
+    } else if let Some(written) = count(report, "Destination bytes written: ") {
+        let _ = writeln!(
+            short,
+            "Written this invocation: {} (file count not recorded)",
+            short_bytes(written)
+        );
+    }
+    if let Some(pending) = count(report, "Pending destination content: ") {
+        if pending > 0 {
+            let _ = writeln!(short, "Pending: {pending} unique files");
+        }
+    }
+    if let (Some(symlinks), Some(special)) = (
+        count(report, "Skipped symlinks: "),
+        count(report, "Skipped special files: "),
+    ) {
+        if symlinks > 0 || special > 0 {
+            let _ = writeln!(
+                short,
+                "Skipped: {symlinks} symlinks, {special} special files"
+            );
+        }
+    }
+    if let (Some(source), Some(content)) = (
+        count(report, "Current source errors: "),
+        count(report, "Current content errors: "),
+    ) {
+        let failed = count(report, "Failed: ").unwrap_or(0);
+        let _ = writeln!(
+            short,
+            "Failed: {source} source, {content} content, {failed} verification"
+        );
+    }
+    let mut reasons = false;
+    for line in report.lines() {
+        if line.starts_with("VERDICT: ") {
+            reasons = true;
+        } else if reasons && line.starts_with("Run: ") {
+            break;
+        } else if reasons && line.starts_with("  ") {
+            let reason = line.trim();
+            if !reason.starts_with("Source files:")
+                && !reason.starts_with("Destination groups:")
+                && !reason.starts_with("Source bytes:")
+            {
+                let _ = writeln!(short, "{reason}");
+            }
+        }
+    }
+    short.push_str("Details: unduplicator report --full (with the same catalog and run)\n");
+    short
 }
 
 pub fn generate(db: &Connection, run: i64) -> Result<String> {

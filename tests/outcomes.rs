@@ -124,7 +124,8 @@ fn failed_copy_and_interruption_identify_resumable_work() {
         assert!(stderr.contains("unfinished run 1"));
         assert!(stderr.contains("Resume:"));
         let review = String::from_utf8_lossy(&output.stdout);
-        assert!(review.contains("UNDUPLICATOR — RUN QUICK CHECK"));
+        assert!(review.contains("Run 1: FAIL"));
+        assert!(review.contains("Copied this invocation: 0 files"));
         assert!(review.contains(if code == 130 {
             "Last invocation: interrupted"
         } else {
@@ -139,6 +140,17 @@ fn failed_copy_and_interruption_identify_resumable_work() {
             .unwrap();
         assert!(report.status.success());
         assert!(review.ends_with(String::from_utf8_lossy(&report.stdout).as_ref()));
+        let full_report = Command::new(env!("CARGO_BIN_EXE_unduplicator"))
+            .arg("report")
+            .arg("--catalog")
+            .arg(temp.path().join("db"))
+            .args(["--run", "1", "--full"])
+            .output()
+            .unwrap();
+        assert!(full_report.status.success());
+        assert!(
+            String::from_utf8_lossy(&full_report.stdout).contains("UNDUPLICATOR — RUN QUICK CHECK")
+        );
         let resumed = Command::new(env!("CARGO_BIN_EXE_unduplicator"))
             .arg("resume")
             .arg("--catalog")

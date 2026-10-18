@@ -75,24 +75,37 @@ fn identity(path: &Path) -> Option<String> {
             .join(format!("{}:{}", libc::major(device), libc::minor(device)))
             .canonicalize()
             .ok()?;
-        let mut disk = sys;
-        if disk.join("partition").exists() {
-            disk = disk.parent()?.to_owned();
-        }
-        let slaves = std::fs::read_dir(disk.join("slaves"))
-            .ok()?
-            .collect::<std::io::Result<Vec<_>>>()
-            .ok()?;
-        if !slaves.is_empty() || disk.to_string_lossy().contains("/virtual/") {
-            return None;
-        }
-        Some(disk.to_string_lossy().into_owned())
+        physical(sys).map(|disk| disk.to_string_lossy().into_owned())
     }
     #[cfg(not(target_os = "linux"))]
     {
         let _ = path;
         None
     }
+}
+
+/// Follow device-mapper/md `slaves` (LUKS, LVM) down to one real disk.
+/// `None` when the device is purely virtual or spans several disks.
+#[cfg(target_os = "linux")]
+fn physical(mut disk: std::path::PathBuf) -> Option<std::path::PathBuf> {
+    if disk.join("partition").exists() {
+        disk = disk.parent()?.to_owned();
+    }
+    let slaves = std::fs::read_dir(disk.join("slaves"))
+        .ok()?
+        .map(|entry| entry.ok()?.path().canonicalize().ok())
+        .collect::<Option<Vec<_>>>()?;
+    if slaves.is_empty() {
+        return (!disk.to_string_lossy().contains("/virtual/")).then_some(disk);
+    }
+    let mut found = None;
+    for slave in slaves {
+        let resolved = physical(slave)?;
+        if found.get_or_insert_with(|| resolved.clone()) != &resolved {
+            return None;
+        }
+    }
+    found
 }
 
 #[cfg(test)]

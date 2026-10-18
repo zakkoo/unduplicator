@@ -12,6 +12,16 @@ fn real_image_video_and_staged_content() {
     let (date, diagnostic) = extract_metadata(&fixtures.join("capture.mp4"));
     assert!(diagnostic.is_none());
     assert_eq!(date.unwrap().date.unwrap().to_string(), "2020-02-29");
+    let (date, diagnostic) = extract_metadata(&fixtures.join("capture.png"));
+    assert!(diagnostic.is_none());
+    let date = date.unwrap();
+    assert_eq!(date.date.unwrap().to_string(), "2011-05-06");
+    assert_eq!(date.provenance, "XMP:DateCreated");
+    let (date, diagnostic) = extract_metadata(&fixtures.join("capture.mov"));
+    assert!(diagnostic.is_none());
+    let date = date.unwrap();
+    assert_eq!(date.date.unwrap().to_string(), "2012-06-07");
+    assert_eq!(date.provenance, "QuickTime:CreateDate");
     let temp = tempfile::tempdir().unwrap();
     let stage = temp.path().join("stage-without-extension");
     std::fs::copy(fixtures.join("capture.jpg"), &stage).unwrap();

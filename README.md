@@ -17,7 +17,7 @@ From this repository, run:
 unduplicator --version
 ```
 
-The script runs the full test suite, builds a production release, and installs `unduplicator` in `~/.local/bin`. Run the same script again to update an existing installation. It replaces the installed binary only after testing and building succeed. If `~/.local/bin` is not in your `PATH`, the script tells you how to add it. The current version is `0.2.0`.
+The script runs the full test suite, builds a production release, and installs `unduplicator` in `~/.local/bin`. Run the same script again to update an existing installation. It replaces the installed binary only after testing and building succeed. If `~/.local/bin` is not in your `PATH`, the script tells you how to add it. The current version is `0.2.1`.
 
 ## Before importing
 

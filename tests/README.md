@@ -26,7 +26,7 @@ These environment variables are unnecessary in a normal terminal.
 ## Validation limits
 
 Executable filesystem validation is on this Linux host only. Other platforms
-are rejected. Real media metadata fixtures cover JPEG and MP4; other extensions
+are rejected. Real media metadata fixtures cover JPEG, PNG, MP4, and MOV; other extensions
 have classification coverage. Disk topology/concurrency tests use instrumented
 identities, not two physical HDDs. Process crashes, injected failures and successful
 flush calls do not establish power-loss durability or storage firmware behavior.
@@ -58,11 +58,11 @@ cargo test --test naming
 every listed extension, leap/invalid dates, numeric filename boundaries,
 offset literal dates, original timestamp priority, Unknown and Other layouts,
 metadata tag priority and invalid/malformed/absent metadata, missing process,
-real JPEG/MP4 extraction, extension-less staging, persisted provenance,
+real JPEG/PNG/MP4/MOV extraction, extension-less staging, persisted provenance,
 representatives, completion-order variation, reopened catalog path stability,
 same basenames with different content, existing-name preservation and secondary
 conflicts. Fixture provenance and regeneration commands: fixtures/README.md.
-JPEG and MP4 are the only real formats tested; others have classification coverage.
+JPEG, PNG, MP4, and MOV are the real formats tested; others have classification coverage.
 
 ## Publication: executed
 
@@ -164,11 +164,11 @@ openspec validate implement-rust-importer --strict --json
 git diff --check
 ```
 
-On 2026-10-14, all commands passed: 33 default tests and 35 feature-enabled tests,
-zero failures/ignored tests. The feature suite includes all seven process-crash
-windows and an interrupted multi-source acceptance run. A clean baseline yields
+On 2026-10-18, the feature-enabled suite passed 47 tests with zero failures or
+ignored tests. It includes twelve import crash windows, five verification/report
+crash windows, and an interrupted multi-source acceptance run. A clean baseline yields
 the same digest/path map as resume; a later source import writes only new content.
-Acceptance checks real JPEG/MP4 layouts, same-name collision suffixes, native Unix
+Acceptance checks real JPEG/PNG/MP4/MOV layouts, same-name collision suffixes, native Unix
 names, oversized files, unchanged source paths/content/mtime, staged byte peak,
 full final digests, distinct dependencies and verified run states together.
 

@@ -284,7 +284,7 @@ also conflicts, the tool reports an error. Native Unix basenames are retained.
 Catalog reservations include temporary names. Temporary names receive a
 deterministic numeric suffix when needed so they never alias a reserved final
 name, including a source basename resembling the tool's temporary namespace.
-Real metadata fixtures currently cover JPEG and MP4; all listed extensions have
+Real metadata fixtures currently cover JPEG, PNG, MP4, and MOV; all listed extensions have
 classification tests, which do not establish metadata coverage for every format.
 
 ## Supported media

@@ -341,3 +341,46 @@ fn missing_catalog_is_not_created_and_empty_catalog_lists_cleanly() {
     let _cat = Catalog::open(&path, true).unwrap();
     assert!(text(&cli(&path, "runs", None)).contains("No runs recorded."));
 }
+
+#[test]
+fn duplicate_details_limit_groups_and_paths_and_escape_names() {
+    use sha2::{Digest, Sha256};
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let source = root.join("source");
+    std::fs::create_dir(&source).unwrap();
+    let repeated = b"top duplicate";
+    std::fs::write(source.join("00-line\nbreak"), repeated).unwrap();
+    for index in 1..12 {
+        std::fs::write(source.join(format!("{index:02}-copy")), repeated).unwrap();
+    }
+    for size in 1..=10 {
+        let bytes = vec![size as u8; size];
+        for copy in 0..2 {
+            std::fs::write(source.join(format!("group-{size:02}-{copy}")), &bytes).unwrap();
+        }
+    }
+
+    let output = text(&import(root, "source"));
+    assert!(output.contains("Run 1: PASS"));
+    let report = full(&root.join("db"), 1);
+    let details = report
+        .split("LARGEST WITHIN-SOURCE DUPLICATE GROUPS (up to 10 groups, 10 paths each)\n")
+        .nth(1)
+        .unwrap()
+        .split("\nCHECK RESULT")
+        .next()
+        .unwrap();
+    assert_eq!(details.matches("  SHA-256: ").count(), 10);
+    assert!(details.contains("  ... 1 more duplicate groups"));
+    assert!(details.contains("    ... 2 more source paths"));
+    let digest = format!("{:x}", Sha256::digest(repeated));
+    assert!(details.starts_with(&format!("  SHA-256: {digest}\n")));
+    assert!(details.contains("00-line\\nbreak"));
+    assert!(!details.contains("00-line\nbreak"));
+    assert!(details.contains("09-copy"));
+    assert!(!details.contains("10-copy"));
+    assert!(!details.contains("11-copy"));
+    assert_eq!(details.matches("  Copies: ").count(), 10);
+}

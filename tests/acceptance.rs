@@ -77,6 +77,8 @@ fn multi_source_resume_deduplication_layout_budget_and_verification() {
     let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     std::fs::copy(fixtures.join("capture.jpg"), source.join("20200229.jpg")).unwrap();
     std::fs::copy(fixtures.join("capture.mp4"), source.join("video.mp4")).unwrap();
+    std::fs::copy(fixtures.join("capture.png"), source.join("image.png")).unwrap();
+    std::fs::copy(fixtures.join("capture.mov"), source.join("movie.mov")).unwrap();
     std::fs::write(source.join("empty"), b"").unwrap();
     #[cfg(unix)]
     {
@@ -143,6 +145,16 @@ fn multi_source_resume_deduplication_layout_budget_and_verification() {
         paths
             .iter()
             .any(|p| p == "Media/2020/2020-02/2020-02-29/video.mp4")
+    );
+    assert!(
+        paths
+            .iter()
+            .any(|p| p == "Media/2011/2011-05/2011-05-06/image.png")
+    );
+    assert!(
+        paths
+            .iter()
+            .any(|p| p == "Media/2012/2012-06/2012-06-07/movie.mov")
     );
     assert!(paths.iter().any(|p| p == "Other/same.txt"));
     assert!(

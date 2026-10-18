@@ -68,21 +68,11 @@ pub fn check_parent(root: &Path, parent: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Include the root's parent to persist creation of the destination itself.
+/// Only the final's parent changes on link/unlink; every ancestor was synced
+/// when `create_parents` created it, so one directory flush is sufficient.
 pub fn sync_parents(parent: &Path, root: &Path) -> Result<()> {
     check_parent(root, parent)?;
-    let boundary = root.parent().context("destination has no parent")?;
-    let mut current = parent;
-    loop {
-        sync_directory(current)?;
-        if current == boundary {
-            break;
-        }
-        current = current
-            .parent()
-            .context("directory outside destination root")?;
-    }
-    Ok(())
+    sync_directory(parent)
 }
 
 pub(crate) fn create_parents(parent: &Path, hook: &mut Hook<'_>) -> Result<()> {

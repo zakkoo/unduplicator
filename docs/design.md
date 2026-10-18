@@ -211,8 +211,8 @@ The current publication adapter supports Linux. It publishes through an atomic
 same-filesystem hard link from the exclusive destination temporary file, then
 unlinks the temporary name. Existing final names are never replaced. Finished
 content is synced before publication; new directories and their parents are
-synced on creation, and final ancestors through the destination's parent are
-synced before catalog completion. Unsupported hard links or directory fsync,
+synced on creation, and the final's parent directory is synced before catalog
+completion. Unsupported hard links or directory fsync,
 and failed file/directory/catalog operations, report errors and preserve pending
 work. Validated on this Linux host with real temporary-directory files; other
 platforms are explicitly rejected. Successful flush calls still depend on the

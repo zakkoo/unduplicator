@@ -69,6 +69,53 @@ fn successful_import_verification_mismatch_and_invalid_invocation() {
 
 #[cfg(unix)]
 #[test]
+fn destination_directory_symlink_cannot_write_into_source() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("source");
+    let destination = temp.path().join("dest");
+    std::fs::create_dir(&source).unwrap();
+    std::fs::create_dir(&destination).unwrap();
+    std::fs::write(source.join("a.txt"), b"original").unwrap();
+    symlink(&source, destination.join("Other")).unwrap();
+
+    let output = import(&temp).output().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("symlink in destination directory"));
+    assert_eq!(std::fs::read_dir(&source).unwrap().count(), 1);
+    assert_eq!(std::fs::read(source.join("a.txt")).unwrap(), b"original");
+    assert_eq!(
+        unduplicator::catalog::Catalog::open(&temp.path().join("db"), false)
+            .unwrap()
+            .done(1)
+            .unwrap(),
+        0
+    );
+
+    std::fs::remove_file(destination.join("Other")).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_unduplicator"))
+        .arg("resume")
+        .arg("--catalog")
+        .arg(temp.path().join("db"))
+        .args(["--run", "1", "--verify"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(std::fs::read_dir(&source).unwrap().count(), 1);
+    assert_eq!(
+        std::fs::read(destination.join("Other/a.txt")).unwrap(),
+        b"original"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn source_read_failure_and_concurrent_command_are_unsuccessful() {
     use std::os::unix::fs::PermissionsExt;
     let temp = tempfile::tempdir().unwrap();

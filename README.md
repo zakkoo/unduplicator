@@ -60,7 +60,7 @@ The program prints a **Run ID**. Save it for the commands below. To import anoth
 
 - **Identify:** Inventory the source and hash every file with SHA-256. Duplicate content reuses its stored copy, path, and date.
 - **Place:** Images and videos go under `Media/YYYY/YYYY-MM/YYYY-MM-DD/`; other files go under `Other/`. Name clashes get a hash suffix.
-- **Protect:** Source files stay untouched; existing destination files are never overwritten.
+- **Protect:** Source files stay untouched; existing destination files are never overwritten. Symlinked destination directories are rejected.
 
 For media, use the first valid date in this order:
 

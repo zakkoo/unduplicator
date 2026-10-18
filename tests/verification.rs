@@ -148,5 +148,25 @@ fn pass_results_order_shared_dependencies_and_fresh_restart() {
             1
         );
         std::fs::set_permissions(final_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        use std::os::unix::fs::symlink;
+        let other = cfg.destination.join("Other");
+        let saved = cfg.destination.join("saved-other");
+        std::fs::rename(&other, &saved).unwrap();
+        symlink(&saved, &other).unwrap();
+        assert!(
+            verification::verify(
+                &mut cat,
+                &cfg,
+                run,
+                &AtomicBool::new(false),
+                &counters,
+                &pipeline::noop()
+            )
+            .is_err()
+        );
+        assert_eq!(cat.phase(run).unwrap(), "verification-failed");
+        std::fs::remove_file(other).unwrap();
+        std::fs::rename(saved, cfg.destination.join("Other")).unwrap();
     }
 }

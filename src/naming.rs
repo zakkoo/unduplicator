@@ -1,7 +1,7 @@
 use crate::{
     catalog::{Catalog, Content, Source},
     config::Config,
-    media,
+    media, publication,
 };
 use anyhow::{Context, Result, ensure};
 use std::path::{Path, PathBuf};
@@ -53,6 +53,12 @@ pub fn decide(
         .file_name()
         .context("source has no basename")?;
     let mut intended = media::directory(&source.relative, &selected).join(basename);
+    publication::check_parent(
+        &config.destination,
+        &config
+            .destination
+            .join(intended.parent().context("destination has no parent")?),
+    )?;
     if catalog.path_reserved(&intended)? || exists(&config.destination.join(&intended))? {
         intended = suffixed(&intended, digest)?;
         ensure!(

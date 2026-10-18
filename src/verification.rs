@@ -3,7 +3,7 @@ use crate::{
     config::Config,
     pipeline::{Counters, Observer},
     progress::Reporter,
-    staging,
+    publication, staging,
 };
 use anyhow::{Result, ensure};
 use rusqlite::params;
@@ -42,18 +42,23 @@ pub fn verify(
         );
         observer("verification_begin")?;
         let path = config.destination.join(&content.intended);
-        let result =
+        let result = publication::check_parent(
+            &config.destination,
+            path.parent().expect("intended path has a parent"),
+        )
+        .and_then(|()| {
             staging::hash_with_progress(&path, None, stop, &counters.verification, &mut || {
                 reporter.update(catalog, counters, false)
             })
-            .and_then(|(digest, size)| {
-                ensure!(
-                    digest == content.digest && size == content.size,
-                    "destination digest/size mismatch: {}",
-                    path.display()
-                );
-                Ok(())
-            });
+        })
+        .and_then(|(digest, size)| {
+            ensure!(
+                digest == content.digest && size == content.size,
+                "destination digest/size mismatch: {}",
+                path.display()
+            );
+            Ok(())
+        });
         ensure!(
             !stop.load(Ordering::Relaxed),
             "interrupted verification pass {pass}; request a fresh full pass for run {run}"

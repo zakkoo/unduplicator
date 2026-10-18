@@ -25,8 +25,52 @@ pub fn sync_directory(path: &Path) -> Result<()> {
         .with_context(|| format!("directory flush unsupported or failed: {}", path.display()))
 }
 
+/// Refuse existing symlinks below the destination root before using a path.
+/// Missing directories are allowed because publication creates them later.
+pub fn check_parent(root: &Path, parent: &Path) -> Result<()> {
+    let relative = parent
+        .strip_prefix(root)
+        .context("path is outside destination root")?;
+    let mut current = root.to_path_buf();
+    let check = |current: &Path| -> Result<()> {
+        match current.symlink_metadata() {
+            Ok(metadata) => {
+                ensure!(
+                    !metadata.file_type().is_symlink(),
+                    "symlink in destination directory: {}",
+                    current.display()
+                );
+                ensure!(
+                    metadata.is_dir(),
+                    "destination parent is not a directory: {}",
+                    current.display()
+                );
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("inspect destination directory {}", current.display())
+                });
+            }
+        }
+        Ok(())
+    };
+    check(&current)?;
+    for component in relative.components() {
+        ensure!(
+            matches!(component, std::path::Component::Normal(_)),
+            "invalid destination directory: {}",
+            parent.display()
+        );
+        current.push(component.as_os_str());
+        check(&current)?;
+    }
+    Ok(())
+}
+
 /// Include the root's parent to persist creation of the destination itself.
 pub fn sync_parents(parent: &Path, root: &Path) -> Result<()> {
+    check_parent(root, parent)?;
     let boundary = root.parent().context("destination has no parent")?;
     let mut current = parent;
     loop {
@@ -81,6 +125,7 @@ pub fn publish(
     let final_path = root.join(&content.intended);
     let temporary = root.join(&content.temporary);
     let parent = final_path.parent().context("final has no parent")?;
+    check_parent(root, parent)?;
     create_parents(parent, hook)?;
     let mut output = OpenOptions::new()
         .write(true)
@@ -124,6 +169,7 @@ pub fn publish_existing_temporary(
 ) -> Result<()> {
     let temporary = root.join(&content.temporary);
     let final_path = root.join(&content.intended);
+    check_parent(root, final_path.parent().context("final has no parent")?)?;
     File::open(&temporary)?
         .sync_all()
         .context("temporary file flush failed")?;

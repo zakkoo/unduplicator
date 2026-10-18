@@ -62,6 +62,14 @@ pub fn reconcile(
         let result = (|| {
             let final_path = config.destination.join(&content.intended);
             let temporary = config.destination.join(&content.temporary);
+            publication::check_parent(
+                &config.destination,
+                final_path.parent().context("final has no parent")?,
+            )?;
+            publication::check_parent(
+                &config.destination,
+                temporary.parent().context("temporary has no parent")?,
+            )?;
             if final_path.symlink_metadata().is_ok() {
                 ensure!(
                     matches(&final_path, &content, stop, &counters.recovery)?,

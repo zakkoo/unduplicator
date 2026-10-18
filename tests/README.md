@@ -70,8 +70,9 @@ JPEG and MP4 are the only real formats tested; others have classification covera
 cargo test --test publication
 ```
 
-2 tests passed on Linux. Real files exercise hard-link no-replace publication,
+3 tests passed on Linux. Real files exercise hard-link no-replace publication,
 exclusive temporary files, directory flushes and preexisting final preservation.
+Publication rejects a destination directory changed to a symlink after naming.
 Instrumented ordering checks pending commit before copy, file sync before
 publication, directory sync before catalog commit, and stage removal after commit.
 Injected transfer, sync-boundary, commit-boundary and actual SQLite trigger failures keep source
@@ -135,7 +136,7 @@ cargo test --features test-failpoints --test outcomes
 ```
 
 2 synthetic-clock ETA tests, 7 pipeline tests with progress snapshots, 1
-verification integration test and 3 outcome subprocess tests passed. Covers
+verification integration test and 4 outcome subprocess tests passed. Covers
 pending duplicate snapshots and draining destination demand, distinct counters
 and oversized rereads, byte-weighted estimates independent of file count,
 unique-fraction refinement, overlap vs serialization, startup/zero-byte Estimating,
@@ -144,7 +145,9 @@ shared dependencies, fresh full verification after interruption, mismatch and
 missing/permission-denied destinations. Outcome subprocesses verify unverified
 import success, requested verification success, failed copy exit 1, mismatch
 exit 1, invalid invocation exit 2, interruption exit 130 and verified resume.
-They also cover a real source permission failure and concurrent-command rejection.
+They also cover a real source permission failure, concurrent-command rejection,
+and a symlinked destination directory that would otherwise write into the source.
+Recovery and verification reject symlinked destination directories as well.
 Redirected output includes initial/final progress and summaries; terminals use
 line refresh. ETA remains approximate and is not a hardware throughput benchmark.
 

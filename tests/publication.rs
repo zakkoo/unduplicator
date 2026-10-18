@@ -1,7 +1,51 @@
 use std::sync::atomic::AtomicBool;
 use unduplicator::{
-    catalog::Catalog, config::Config, inventory::inventory, naming::decide, publication,
+    catalog::{Catalog, Content},
+    config::Config,
+    inventory::inventory,
+    naming::decide,
+    publication,
 };
+
+#[cfg(unix)]
+#[test]
+fn publication_rejects_parent_symlink_added_after_naming() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("source");
+    let destination = temp.path().join("dest");
+    let stage = temp.path().join("stage");
+    std::fs::create_dir(&source).unwrap();
+    std::fs::create_dir(&destination).unwrap();
+    std::fs::write(source.join("a"), b"original").unwrap();
+    std::fs::write(&stage, b"original").unwrap();
+    let content = Content {
+        digest: "a".repeat(64),
+        size: 8,
+        source: source.join("a"),
+        intended: "Other/a".into(),
+        stage: Some(stage.clone()),
+        temporary: "Other/.unduplicator-test.tmp".into(),
+        complete: false,
+        date: None,
+        provenance: "unknown".into(),
+    };
+    symlink(&source, destination.join("Other")).unwrap();
+    let result = publication::publish(
+        &content,
+        &destination,
+        &stage,
+        &AtomicBool::new(false),
+        &mut |_| Ok(()),
+        &mut |_| {},
+    );
+    assert!(format!("{:#}", result.unwrap_err()).contains("symlink in destination directory"));
+    assert!(
+        publication::publish_existing_temporary(&content, &destination, &mut |_| Ok(())).is_err()
+    );
+    assert_eq!(std::fs::read_dir(&source).unwrap().count(), 1);
+}
 
 #[test]
 fn real_publication_preserves_conflicts_and_failure_keeps_pending() {

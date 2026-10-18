@@ -111,6 +111,51 @@ fn validate_adopt_retry_conflict_and_completed_cleanup() {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn pending_copy_rejects_destination_symlink_until_it_is_removed() {
+    use sha2::Digest;
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("source");
+    std::fs::create_dir(&source).unwrap();
+    std::fs::write(source.join("a.txt"), b"content").unwrap();
+    let cfg = Config::validate(
+        &source,
+        &temp.path().join("dest"),
+        &temp.path().join("db"),
+        &temp.path().join("stage"),
+        7,
+    )
+    .unwrap();
+    let mut cat = Catalog::open(&cfg.catalog, true).unwrap();
+    let run = cat.new_run(&cfg).unwrap();
+    inventory(&mut cat, &cfg, run, &AtomicBool::new(false)).unwrap();
+    let row = cat.source_rows(run, false).unwrap().remove(0);
+    let digest = format!("{:x}", sha2::Sha256::digest(b"content"));
+    let content = decide(&cat, &cfg, &row, &digest, None).unwrap();
+    cat.claim(&row, &content).unwrap();
+    std::fs::create_dir(&cfg.destination).unwrap();
+    symlink(&source, cfg.destination.join("Other")).unwrap();
+    let stop = AtomicBool::new(false);
+    let counters = Counters::default();
+    let gates = Gates::discover(&cfg.source, &cfg.destination, &cfg.staging);
+    let result = recovery::reconcile(&mut cat, &cfg, &stop, &counters, &gates, &pipeline::noop());
+    assert!(format!("{:#}", result.unwrap_err()).contains("symlink in destination directory"));
+    assert_eq!(cat.done(run).unwrap(), 0);
+    assert_eq!(std::fs::read_dir(&source).unwrap().count(), 1);
+
+    std::fs::remove_file(cfg.destination.join("Other")).unwrap();
+    recovery::reconcile(&mut cat, &cfg, &stop, &counters, &gates, &pipeline::noop()).unwrap();
+    assert_eq!(cat.done(run).unwrap(), 1);
+    assert_eq!(
+        std::fs::read(cfg.destination.join("Other/a.txt")).unwrap(),
+        b"content"
+    );
+    assert_eq!(std::fs::read_dir(&source).unwrap().count(), 1);
+}
+
 #[test]
 fn recovery_drains_full_budget_before_new_staging() {
     let temp = tempfile::tempdir().unwrap();

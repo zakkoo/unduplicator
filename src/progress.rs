@@ -204,7 +204,7 @@ impl Reporter {
             scanner: None,
         }
     }
-    /// Refresh the catalog-derived fields once a second on a separate
+    /// Refresh the catalog-derived fields periodically on a separate
     /// read-only connection, so the pipeline thread never waits on the scans.
     fn spawn_scanner(&mut self, catalog: &Catalog) {
         let (path, run, budget, verification_total) =
@@ -215,10 +215,12 @@ impl Reporter {
                 return;
             };
             while !stop.load(Ordering::Relaxed) {
+                let started = Instant::now();
                 if let Ok(snapshot) = Snapshot::scan(&db, run, budget, verification_total) {
                     *scanned.lock().unwrap() = Some(snapshot);
                 }
-                std::thread::sleep(Duration::from_secs(1));
+                // Keep the scan under ~10% of a core: large catalogs refresh less often.
+                std::thread::sleep((started.elapsed() * 10).max(Duration::from_secs(1)));
             }
         }));
     }

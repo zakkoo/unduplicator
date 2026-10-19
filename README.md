@@ -28,7 +28,7 @@ Keep the catalog and its `.lock` file on reliable storage. Put the source, desti
 | Command | What it is for |
 | --- | --- |
 | `import` | Start a new source-drive import; `--verify` checks destination hashes after copying. |
-| `resume` | Continue an interrupted or failed run using its saved settings; add `--verify` to check the result. |
+| `resume` | Continue an interrupted or failed run using its saved settings; add `--verify` to check the result. `--verify` is not a saved setting: pass it on every invocation that should verify. |
 | `verify` | Start a fresh, full destination hash check for a completed run. |
 | `runs` | List run IDs, phases, source paths, and saved-report times. |
 | `report` | Show a short saved review; add `--full` for the detailed report. Neither reads the drives again. |
@@ -80,6 +80,8 @@ Use this after fixing the cause of an interruption or failed copy. Replace `1` w
 ```sh
 unduplicator resume --catalog /ssd/catalog.sqlite --run 1 --verify
 ```
+
+`--verify` applies only to the invocation it is given to. An `import --verify` that was interrupted and then resumed without `--verify` finishes the copy but skips verification, and the report shows REVIEW. Run `verify` afterwards to get PASS.
 
 ### Check destination files again
 

@@ -95,7 +95,7 @@ impl Catalog {
             "unsupported catalog schema version {version}"
         );
         db.execute_batch(
-            "PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;",
+            "PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;",
         )?;
         if version == 0 {
             db.execute_batch("BEGIN IMMEDIATE;

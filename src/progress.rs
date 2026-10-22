@@ -3,7 +3,10 @@ use anyhow::Result;
 use rusqlite::{Connection, params};
 use std::{
     io::{IsTerminal, Write},
-    sync::atomic::Ordering,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -24,12 +27,23 @@ pub struct Snapshot {
     pub observed: u64,
     pub unique_observed: u64,
     pub verification_total: Option<u64>,
+    pending: u64,
 }
 impl Snapshot {
     pub fn load(
         db: &Connection,
         run: i64,
         counters: &Counters,
+        budget: u64,
+        verification_total: Option<u64>,
+    ) -> Result<Self> {
+        Ok(Self::scan(db, run, budget, verification_total)?.with_counters(counters))
+    }
+    /// Catalog scans only; several full passes over source_files, so callers
+    /// keep this off the pipeline thread.
+    pub fn scan(
+        db: &Connection,
+        run: i64,
         budget: u64,
         verification_total: Option<u64>,
     ) -> Result<Self> {
@@ -42,28 +56,31 @@ impl Snapshot {
         let (unseen,oversized):(i64,i64)=db.query_row("SELECT COALESCE(SUM(size),0),COALESCE(SUM(CASE WHEN size>?2 THEN size ELSE 0 END),0) FROM source_files WHERE run=?1 AND digest IS NULL",params![run,budget as i64],|r|Ok((r.get(0)?,r.get(1)?)))?;
         let (known,pending,fallback):(i64,i64,i64)=db.query_row("SELECT COALESCE(SUM(size),0),COALESCE(SUM(CASE WHEN state!='complete' THEN size ELSE 0 END),0),
             COALESCE(SUM(CASE WHEN state!='complete' AND stage IS NULL THEN size ELSE 0 END),0) FROM contents WHERE digest IN (SELECT digest FROM source_files WHERE run=?1)",[run],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
-        let source_read = counters.source.load(Ordering::Relaxed);
-        let destination_written = counters.destination.load(Ordering::Relaxed);
-        let unique_observed = counters.unique.load(Ordering::Relaxed);
-        let uncommitted =
-            destination_written.saturating_sub(unique_observed.saturating_sub(pending as u64));
         Ok(Self {
             done: done as u64,
             total: total as u64,
             total_source: total_source as u64,
-            source_read,
-            destination_written,
-            verification_read: counters.verification.load(Ordering::Relaxed),
-            recovery_read: counters.recovery.load(Ordering::Relaxed),
             source_remaining: unseen as u64,
             oversized_remaining: oversized as u64,
             fallback_remaining: fallback as u64,
             known_unique: known as u64,
-            destination_remaining: (pending as u64).saturating_sub(uncommitted),
-            observed: counters.observed.load(Ordering::Relaxed),
-            unique_observed,
             verification_total,
+            pending: pending as u64,
+            ..Self::default()
         })
+    }
+    pub fn with_counters(mut self, counters: &Counters) -> Self {
+        self.source_read = counters.source.load(Ordering::Relaxed);
+        self.destination_written = counters.destination.load(Ordering::Relaxed);
+        self.unique_observed = counters.unique.load(Ordering::Relaxed);
+        self.verification_read = counters.verification.load(Ordering::Relaxed);
+        self.recovery_read = counters.recovery.load(Ordering::Relaxed);
+        self.observed = counters.observed.load(Ordering::Relaxed);
+        let uncommitted = self
+            .destination_written
+            .saturating_sub(self.unique_observed.saturating_sub(self.pending));
+        self.destination_remaining = self.pending.saturating_sub(uncommitted);
+        self
     }
     pub fn line(&self, eta: Option<Duration>) -> String {
         let estimate = eta
@@ -167,6 +184,9 @@ pub struct Reporter {
     last_render: Option<Duration>,
     estimator: Estimator,
     terminal: bool,
+    scanned: Arc<Mutex<Option<Snapshot>>>,
+    stop: Arc<AtomicBool>,
+    scanner: Option<std::thread::JoinHandle<()>>,
 }
 impl Reporter {
     pub fn new(run: i64, budget: u64, independent: bool, verification_total: Option<u64>) -> Self {
@@ -179,7 +199,30 @@ impl Reporter {
             last_render: None,
             estimator: Estimator::default(),
             terminal: std::io::stdout().is_terminal(),
+            scanned: Arc::new(Mutex::new(None)),
+            stop: Arc::new(AtomicBool::new(false)),
+            scanner: None,
         }
+    }
+    /// Refresh the catalog-derived fields periodically on a separate
+    /// read-only connection, so the pipeline thread never waits on the scans.
+    fn spawn_scanner(&mut self, catalog: &Catalog) {
+        let (path, run, budget, verification_total) =
+            (catalog.path.clone(), self.run, self.budget, self.verification_total);
+        let (scanned, stop) = (self.scanned.clone(), self.stop.clone());
+        self.scanner = Some(std::thread::spawn(move || {
+            let Ok(db) = Connection::open(&path) else {
+                return;
+            };
+            while !stop.load(Ordering::Relaxed) {
+                let started = Instant::now();
+                if let Ok(snapshot) = Snapshot::scan(&db, run, budget, verification_total) {
+                    *scanned.lock().unwrap() = Some(snapshot);
+                }
+                // Keep the scan under ~10% of a core: large catalogs refresh less often.
+                std::thread::sleep((started.elapsed() * 10).max(Duration::from_secs(1)));
+            }
+        }));
     }
     pub fn update(&mut self, catalog: &Catalog, counters: &Counters, force: bool) -> Result<()> {
         let time = self.start.elapsed();
@@ -190,13 +233,18 @@ impl Reporter {
         {
             return Ok(());
         }
-        let snapshot = Snapshot::load(
-            &catalog.db,
-            self.run,
-            counters,
-            self.budget,
-            self.verification_total,
-        )?;
+        let scanned = if force {
+            Snapshot::scan(&catalog.db, self.run, self.budget, self.verification_total)?
+        } else {
+            if self.scanner.is_none() {
+                self.spawn_scanner(catalog);
+            }
+            match self.scanned.lock().unwrap().clone() {
+                Some(scanned) => scanned,
+                None => return Ok(()),
+            }
+        };
+        let snapshot = scanned.with_counters(counters);
         self.estimator.sample(time, &snapshot);
         let line = snapshot.line(self.estimator.eta(&snapshot, self.independent));
         if self.terminal {
@@ -211,6 +259,7 @@ impl Reporter {
 }
 impl Drop for Reporter {
     fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
         if self.terminal {
             println!();
         }

@@ -210,37 +210,24 @@ pub fn cleanup_orphans(catalog: &Catalog, config: &Config) -> Result<()> {
             }
         }
     }
-    fn visit(
-        path: &Path,
-        temporaries: &HashSet<std::path::PathBuf>,
-        owned: &HashSet<std::path::PathBuf>,
-        finals: &HashSet<std::path::PathBuf>,
-    ) -> Result<()> {
-        if !path.is_dir() {
-            return Ok(());
+    // Hard-link publication can leave a redundant tool temporary after adoption.
+    // Only catalog-owned paths are candidates, so check them directly instead of
+    // walking the destination (which may hold unreadable directories like lost+found).
+    for path in &owned_temporaries {
+        if temporaries.contains(path)
+            || finals.contains(path)
+            || !path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(temp_name)
+            || !path.symlink_metadata().is_ok_and(|m| m.is_file())
+        {
+            continue;
         }
-        for entry in std::fs::read_dir(path)? {
-            let entry = entry?;
-            let kind = entry.file_type()?;
-            if kind.is_dir() {
-                visit(&entry.path(), temporaries, owned, finals)?;
-            } else if kind.is_file()
-                && entry.file_name().to_str().is_some_and(temp_name)
-                && !temporaries.contains(&entry.path())
-                && owned.contains(&entry.path())
-                && !finals.contains(&entry.path())
-            {
-                // Hard-link publication can leave a redundant tool temporary after adoption.
-                std::fs::remove_file(entry.path())?;
-                publication::sync_directory(path)?;
-            }
+        std::fs::remove_file(path)?;
+        if let Some(parent) = path.parent() {
+            publication::sync_directory(parent)?;
         }
-        Ok(())
     }
-    visit(
-        &config.destination,
-        &temporaries,
-        &owned_temporaries,
-        &finals,
-    )
+    Ok(())
 }

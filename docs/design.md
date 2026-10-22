@@ -41,7 +41,7 @@ before checking; source symlinks will not be followed during inventory.
 Resume accepts only the catalog, positive run ID, and optional verification;
 it will reuse stored roots and budget.
 
-The catalog uses schema version 2, SQLite WAL with FULL synchronization, and an
+The catalog uses schema version 2, SQLite WAL with NORMAL synchronization, and an
 exclusive import/resume/verify command lock. Concurrent write commands and a different destination are
 rejected. Retain the catalog and its lock file. Inventory records native Unix
 path bytes, original birth/modification times, extensions and sizes in batches
@@ -211,8 +211,8 @@ The current publication adapter supports Linux. It publishes through an atomic
 same-filesystem hard link from the exclusive destination temporary file, then
 unlinks the temporary name. Existing final names are never replaced. Finished
 content is synced before publication; new directories and their parents are
-synced on creation, and final ancestors through the destination's parent are
-synced before catalog completion. Unsupported hard links or directory fsync,
+synced on creation, and the final's parent directory is synced before catalog
+completion. Unsupported hard links or directory fsync,
 and failed file/directory/catalog operations, report errors and preserve pending
 work. Validated on this Linux host with real temporary-directory files; other
 platforms are explicitly rejected. Successful flush calls still depend on the

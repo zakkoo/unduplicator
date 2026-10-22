@@ -46,8 +46,91 @@ pub fn metadata_json(bytes: &[u8]) -> Result<Option<SelectedDate>, String> {
     Ok(None)
 }
 
+const EXIFTOOL_ARGS: [&str; 8] = [
+    "-j",
+    "-G0",
+    "-api",
+    "QuickTimeUTC=0",
+    "-DateTimeOriginal",
+    "-DateCreated",
+    "-CreationDate",
+    "-CreateDate",
+];
+
+/// One long-lived `exiftool -stay_open` process; spawning one per file costs
+/// more than reading the file.
+struct Daemon {
+    stdin: std::process::ChildStdin,
+    stdout: std::io::BufReader<std::process::ChildStdout>,
+    _child: std::process::Child,
+}
+static DAEMON: std::sync::Mutex<Option<Daemon>> = std::sync::Mutex::new(None);
+
+impl Daemon {
+    fn spawn(executable: &std::ffi::OsStr) -> std::io::Result<Self> {
+        let mut child = std::process::Command::new(executable)
+            .args(["-stay_open", "True", "-@", "-"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()?;
+        Ok(Self {
+            stdin: child.stdin.take().unwrap(),
+            stdout: std::io::BufReader::new(child.stdout.take().unwrap()),
+            _child: child,
+        })
+    }
+    fn query(&mut self, path: &Path) -> std::io::Result<Vec<u8>> {
+        use std::io::{BufRead, Write};
+        let mut request = Vec::new();
+        for arg in EXIFTOOL_ARGS {
+            request.extend_from_slice(arg.as_bytes());
+            request.push(b'\n');
+        }
+        request.extend_from_slice(&path_bytes(path));
+        request.extend_from_slice(b"\n-execute\n");
+        self.stdin.write_all(&request)?;
+        self.stdin.flush()?;
+        let mut output = Vec::new();
+        loop {
+            let mut line = Vec::new();
+            if self.stdout.read_until(b'\n', &mut line)? == 0 {
+                return Err(std::io::ErrorKind::UnexpectedEof.into());
+            }
+            if line.strip_suffix(b"\n").map(|l| l.strip_suffix(b"\r").unwrap_or(l)) == Some(b"{ready}") {
+                return Ok(output);
+            }
+            output.extend_from_slice(&line);
+        }
+    }
+}
+
 pub fn extract_metadata(path: &Path) -> (Option<SelectedDate>, Option<String>) {
-    extract_metadata_using(path, std::ffi::OsStr::new("exiftool"))
+    let executable = std::ffi::OsStr::new("exiftool");
+    if path_bytes(path).contains(&b'\n') {
+        return extract_metadata_using(path, executable);
+    }
+    let mut daemon = DAEMON.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if daemon.is_none() {
+        match Daemon::spawn(executable) {
+            Ok(spawned) => *daemon = Some(spawned),
+            Err(error) => return (None, Some(format!("ExifTool {}: {error}", path.display()))),
+        }
+    }
+    match daemon.as_mut().unwrap().query(path) {
+        Ok(output) if output.is_empty() => (
+            None,
+            Some(format!("ExifTool {}: no output", path.display())),
+        ),
+        Ok(output) => match metadata_json(&output) {
+            Ok(date) => (date, None),
+            Err(error) => (None, Some(error)),
+        },
+        Err(error) => {
+            *daemon = None;
+            (None, Some(format!("ExifTool {}: {error}", path.display())))
+        }
+    }
 }
 
 pub fn extract_metadata_using(
@@ -55,16 +138,7 @@ pub fn extract_metadata_using(
     executable: &std::ffi::OsStr,
 ) -> (Option<SelectedDate>, Option<String>) {
     let output = std::process::Command::new(executable)
-        .args([
-            "-j",
-            "-G0",
-            "-api",
-            "QuickTimeUTC=0",
-            "-DateTimeOriginal",
-            "-DateCreated",
-            "-CreationDate",
-            "-CreateDate",
-        ])
+        .args(EXIFTOOL_ARGS)
         .arg(path)
         .output();
     match output {

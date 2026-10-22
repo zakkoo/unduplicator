@@ -92,7 +92,7 @@ fn version_lock_pragmas_and_destination_association() {
             .unwrap_err_or_else()
             .contains("locked")
     );
-    for (pragma, expected) in [("foreign_keys", 1), ("synchronous", 2), ("user_version", 2)] {
+    for (pragma, expected) in [("foreign_keys", 1), ("synchronous", 1), ("user_version", 2)] {
         assert_eq!(
             catalog
                 .db

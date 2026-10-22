@@ -1,6 +1,6 @@
 # Spec scenario review
 
-Reviewed against the current main specs on 2026-10-18. Test names below are
+Reviewed against the current main specs on 2026-10-20. Test names below are
 implemented and executed; `lib` means unit tests within the indicated module.
 This map identifies test evidence, not exhaustive proof of every input. Platform,
 fixture and durability limits remain as documented in README.md.
@@ -78,8 +78,13 @@ fixture and durability limits remain as documented in README.md.
 | Scenario | Validation evidence |
 | --- | --- |
 | Supported and other extensions | lib media::exact_extensions_and_dates |
-| Metadata takes priority | media::real_image_video_and_staged_content (JPEG, PNG, MP4, MOV); lib media::priority_and_layout_exclude_staging_times; acceptance::multi_source_resume_deduplication_layout_budget_and_verification |
-| Unusable metadata | media::tag_priority_invalid_absent_and_filesystem_exclusion; media::real_image_video_and_staged_content; lib media::priority_and_layout_exclude_staging_times |
-| Dated and undated media | lib media::priority_and_layout_exclude_staging_times |
+| Metadata takes priority | media::real_image_video_and_staged_content (JPEG, PNG, MP4, MOV); lib media::priority_and_layout_exclude_filesystem_times; acceptance::multi_source_resume_deduplication_layout_budget_and_verification |
+| Unusable metadata | media::tag_priority_invalid_absent_and_filesystem_exclusion; media::real_image_video_and_staged_content; lib media::priority_and_layout_exclude_filesystem_times |
+| Implausible dates are rejected silently | lib media::plausible_dates_include_1900_and_tomorrow_with_literal_offsets; media::implausible_metadata_silently_tries_other_embedded_dates; acceptance::implausible_dates_are_silent_and_unknown_media_uses_filename_pattern_folders |
+| Identifier digits resemble a date | lib media::exact_extensions_and_dates; acceptance::implausible_dates_are_silent_and_unknown_media_uses_filename_pattern_folders |
+| Filesystem timestamps are available but no capture date is usable | lib media::rejected_metadata_falls_back_to_filename_without_using_filesystem_dates; acceptance::implausible_dates_are_silent_and_unknown_media_uses_filename_pattern_folders |
+| Dated and undated media | lib media::priority_and_layout_exclude_filesystem_times; acceptance::implausible_dates_are_silent_and_unknown_media_uses_filename_pattern_folders |
+| Similar unknown filenames share a folder | lib media::unknown_filename_patterns_group_numbers_identifiers_and_safe_names; acceptance::implausible_dates_are_silent_and_unknown_media_uses_filename_pattern_folders |
+| Unknown identifiers and unmatched names | lib media::unknown_filename_patterns_group_numbers_identifiers_and_safe_names; acceptance::implausible_dates_are_silent_and_unknown_media_uses_filename_pattern_folders |
 | Equal names with different content | naming::names_representatives_and_provenance_survive_completion_order_and_resume; acceptance::multi_source_resume_deduplication_layout_budget_and_verification |
 | Worker timing changes | naming::names_representatives_and_provenance_survive_completion_order_and_resume (24 seeded completion-order permutations); acceptance::multi_source_resume_deduplication_layout_budget_and_verification (clean vs interrupted digest/path maps) |

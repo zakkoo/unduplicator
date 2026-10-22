@@ -261,21 +261,36 @@ The tool never modifies, moves, or deletes source files.
 ## Destination
 
 - Media: `/Media/YYYY/YYYY-MM/YYYY-MM-DD/`
-- Media with unknown dates: `/Media/Unknown/`
+- Media with unknown dates: `/Media/Unknown/<filename-pattern>/`
 - Other files: `/Other/`
 - Different content with the same destination name: add a deterministic SHA-256 suffix; never overwrite.
 
-Date priority: image/video metadata, filename, original source filesystem timestamps, then `Unknown`. Staging timestamps do not replace source timestamps. Filesystem timestamps may not be capture dates.
+Date priority: image/video metadata, filename, then `Unknown`. Original source
+timestamps remain recorded in inventory, but neither source nor staging
+filesystem timestamps determine capture dates.
 
 ExifTool is invoked read-only on unique staged media; oversized media uses the
 original source. Valid EXIF DateTimeOriginal wins, then XMP DateCreated,
 QuickTime CreationDate, then embedded CreateDate. Filesystem tags returned by
-ExifTool are excluded. Missing, malformed or invalid metadata produces a
-diagnostic and permits fallback. Calendar dates retain their literal date even
-with offsets; no host timezone conversion occurs. Filename matching chooses
-the leftmost valid YYYY-MM-DD, YYYY_MM_DD or YYYYMMDD with numeric boundaries.
-Invalid dates and zero placeholders are rejected. Original birth time wins over
-modification time, both interpreted in UTC; neither usable means Unknown.
+ExifTool are excluded. Missing or invalid dates silently permit fallback;
+process failures and malformed ExifTool JSON retain their diagnostics. Calendar
+dates retain their literal date even with offsets; no host timezone conversion
+occurs. All candidates must fall between 1900-01-01 and tomorrow's UTC calendar
+date, allowing a one-day tolerance for timezones and clock differences.
+Filename matching chooses the leftmost plausible YYYY-MM-DD, YYYY_MM_DD or
+YYYYMMDD with alphanumeric boundaries, also allowing an ISO `T` time suffix.
+Complete UUIDs are skipped, including ones with plausible dates in their
+numeric segments. No accepted metadata or filename date means Unknown.
+
+Unknown media use deterministic filename-pattern subdirectories, independent
+of inventory order or other files. Number runs become `#`, ASCII letters become
+uppercase, `_` and `-` are retained, and other characters become `_`. Leading
+and trailing separators are removed and labels are limited to 80 ASCII bytes.
+Extensions do not affect grouping. UUID-containing stems use `UUID`, standard
+32/40/64/128-character hexadecimal tokens use `Hash`, and stems without digits
+or with non-UTF-8 names use `Other`. For example, `IMG_1234.jpg` and
+`img_56789.png` share `Media/Unknown/IMG_#/`. Basenames and collision handling
+are preserved. Existing catalog entries are reused without reclassification.
 
 The first inventory-ordered claimant represents each new digest; existing
 digests keep their representative, path, date and provenance. A reserved or

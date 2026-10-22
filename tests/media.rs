@@ -72,3 +72,21 @@ fn tag_priority_invalid_absent_and_filesystem_exclusion() {
     }
     assert!(metadata_json(b"[{}]").unwrap().is_none());
 }
+
+#[test]
+fn implausible_metadata_silently_tries_other_embedded_dates() {
+    let date = metadata_json(
+        br#"[{"EXIF:DateTimeOriginal":"0001:11:01 00:00:00","XMP:DateCreated":"9981-12-01","QuickTime:CreationDate":"2003:01:01","EXIF:CreateDate":"2004:01:01"}]"#,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(date.provenance, "QuickTime:CreationDate");
+    assert_eq!(date.date.unwrap().to_string(), "2003-01-01");
+    assert!(
+        metadata_json(
+            br#"[{"EXIF:DateTimeOriginal":"0001:11:01","EXIF:CreateDate":"9981:12:01"}]"#
+        )
+        .unwrap()
+        .is_none()
+    );
+}

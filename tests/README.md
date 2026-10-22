@@ -54,15 +54,23 @@ cargo test --test media
 cargo test --test naming
 ```
 
-2 date/classification tests, 2 metadata tests and 2 naming tests passed. Cover
-every listed extension, leap/invalid dates, numeric filename boundaries,
-offset literal dates, original timestamp priority, Unknown and Other layouts,
+5 date/classification tests, 3 metadata tests and 2 naming tests passed. Cover
+every listed extension, leap/invalid dates, the 1900 lower bound and tomorrow's
+UTC upper bound (including year rollover), alphanumeric filename boundaries,
+UUID/hash false dates, offset literal dates, exclusion of filesystem dates,
+Unknown filename-pattern folders and Other layouts,
 metadata tag priority and invalid/malformed/absent metadata, missing process,
 real JPEG/PNG/MP4/MOV extraction, extension-less staging, persisted provenance,
 representatives, completion-order variation, reopened catalog path stability,
 same basenames with different content, existing-name preservation and secondary
 conflicts. Fixture provenance and regeneration commands: fixtures/README.md.
 JPEG, PNG, MP4, and MOV are the real formats tested; others have classification coverage.
+
+`acceptance::implausible_dates_are_silent_and_unknown_media_uses_filename_pattern_folders`
+imports and verifies real JPEGs in a temporary collection. It checks silent
+fallback from implausible embedded dates, ignored current filesystem dates,
+shared pattern folders, UUID/hash grouping, preserved source contents and
+basenames, and plausible filename dates.
 
 ## Publication: executed
 

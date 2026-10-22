@@ -68,10 +68,18 @@ For media, use the first valid date in this order:
 | --- | --- |
 | 1 | Embedded EXIF capture, XMP creation, QuickTime creation, then other embedded creation dates. |
 | 2 | Date in the filename. |
-| 3 | Original source birth time, then modification time (UTC). |
-| 4 | No date: `Media/Unknown/`. |
+| 3 | No usable date: `Media/Unknown/<filename-pattern>/`. |
 
-Staging file times are never used. Filesystem dates may differ from the capture date.
+Dates must be between January 1, 1900 and tomorrow (UTC); unusable dates are
+silently skipped. Filename matching excludes UUIDs and dates embedded in
+alphanumeric identifiers. Source and staging filesystem times are never used
+to infer capture dates.
+
+Unknown files are grouped by their filename pattern: number runs become `#`,
+letters are uppercased, and extensions are ignored. For example, `IMG_1234.jpg`
+and `img_56789.png` share `Media/Unknown/IMG_#/`, while
+`00011101_00005341.jpg` goes under `Media/Unknown/#_#/`. UUID and hash names use
+`UUID/` and `Hash/`; names without a numeric pattern use `Other/`.
 
 ### Continue a run
 

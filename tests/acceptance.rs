@@ -57,6 +57,76 @@ fn layout(catalog: &Catalog, run: i64) -> BTreeMap<String, std::path::PathBuf> {
 }
 
 #[test]
+fn implausible_dates_are_silent_and_unknown_media_uses_filename_pattern_folders() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("source");
+    let destination = temp.path().join("dest");
+    let catalog = temp.path().join("db");
+    let stage = temp.path().join("stage");
+    std::fs::create_dir(&source).unwrap();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/capture.jpg");
+    let examples = [
+        ("00011101_00005341.jpg", "Media/Unknown/#_#"),
+        ("IMG_1234.jpg", "Media/Unknown/IMG_#"),
+        ("img_56789.jpg", "Media/Unknown/IMG_#"),
+        (
+            "19280302-3BE4-47A4-AD40-3DEFB724E1DB.jpg",
+            "Media/Unknown/UUID",
+        ),
+        ("aabbccdd20200229aabbccdd20200229.jpg", "Media/Unknown/Hash"),
+        ("holiday.jpg", "Media/Unknown/Other"),
+        ("photo_20200229.jpg", "Media/2020/2020-02/2020-02-29"),
+    ];
+    for (name, _) in examples {
+        let file = source.join(name);
+        std::fs::copy(&fixture, &file).unwrap();
+        // Use real, distinct JPEGs with unusable capture dates and current file times.
+        let output = Command::new("exiftool")
+            .args([
+                "-overwrite_original",
+                "-all=",
+                "-DateTimeOriginal=0001:11:01 00:00:00",
+            ])
+            .arg(format!("-Comment={name}"))
+            .arg(&file)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let original = snapshot(&source);
+    let output = importer(&source, &destination, &catalog, &stage)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("(verified)"));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("metadata diagnostic"));
+    for (name, directory) in examples {
+        let imported = destination.join(directory).join(name);
+        assert_eq!(
+            std::fs::read(&imported).unwrap(),
+            std::fs::read(source.join(name)).unwrap()
+        );
+    }
+    let cat = Catalog::open(&catalog, false).unwrap();
+    assert_eq!(cat.done(1).unwrap(), examples.len() as u64);
+    for content in cat.all_contents().unwrap() {
+        if content.intended.starts_with("Media/Unknown") {
+            assert!(content.date.is_none());
+            assert_eq!(content.provenance, "unknown");
+        }
+    }
+    assert_eq!(snapshot(&source), original);
+}
+
+#[test]
 fn multi_source_resume_deduplication_layout_budget_and_verification() {
     let temp = tempfile::tempdir().unwrap();
     let source = temp.path().join("source");

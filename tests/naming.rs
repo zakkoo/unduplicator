@@ -39,8 +39,8 @@ fn names_representatives_and_provenance_survive_completion_order_and_resume() {
         for (row, digest) in rows.iter().zip(&digests) {
             let content = decide(&cat, &cfg, row, digest, None).unwrap();
             paths.push(content.intended.clone());
-            assert!(content.provenance.starts_with("source "));
-            assert!(content.date.is_some());
+            assert_eq!(content.provenance, "unknown");
+            assert!(content.date.is_none());
             cat.claim(row, &content).unwrap();
         }
         for n in order {

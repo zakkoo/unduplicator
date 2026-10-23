@@ -21,7 +21,7 @@ The script runs the full test suite, builds a production release, and installs `
 
 ## Before importing
 
-Keep the catalog and its `.lock` file on reliable storage. Put the source, destination, catalog, and staging area at separate, non-overlapping paths. Keep the source unchanged until the import finishes.
+Keep the catalog and its `.lock` file on reliable storage. Put the source, destination, catalog, and staging area at separate, non-overlapping paths. Keep the source unchanged until the import finishes. Simultaneous imports using different catalogs need separate staging directories. Historical staging directories cannot be reused as import sources.
 
 ## Commands at a glance
 

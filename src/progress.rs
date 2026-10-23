@@ -207,8 +207,12 @@ impl Reporter {
     /// Refresh the catalog-derived fields periodically on a separate
     /// read-only connection, so the pipeline thread never waits on the scans.
     fn spawn_scanner(&mut self, catalog: &Catalog) {
-        let (path, run, budget, verification_total) =
-            (catalog.path.clone(), self.run, self.budget, self.verification_total);
+        let (path, run, budget, verification_total) = (
+            catalog.path.clone(),
+            self.run,
+            self.budget,
+            self.verification_total,
+        );
         let (scanned, stop) = (self.scanned.clone(), self.stop.clone());
         self.scanner = Some(std::thread::spawn(move || {
             let Ok(db) = Connection::open(&path) else {

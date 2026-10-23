@@ -34,6 +34,8 @@ pub struct Catalog {
     pub db: Connection,
     pub path: PathBuf,
     _lock: File,
+    staging_lock: Option<(PathBuf, File)>,
+    pub identity: String,
 }
 
 #[derive(Clone, Debug)]
@@ -95,7 +97,7 @@ impl Catalog {
             "unsupported catalog schema version {version}"
         );
         db.execute_batch(
-            "PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;",
+            "PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;",
         )?;
         if version == 0 {
             db.execute_batch("BEGIN IMMEDIATE;
@@ -130,15 +132,94 @@ impl Catalog {
         db.execute_batch(
             "CREATE UNIQUE INDEX IF NOT EXISTS content_temporary ON contents(temporary);",
         )?;
+        db.execute_batch("INSERT OR IGNORE INTO metadata(key,value) VALUES('identity',lower(hex(randomblob(16))));
+            CREATE INDEX IF NOT EXISTS content_stage ON contents(stage);
+            CREATE INDEX IF NOT EXISTS content_intended_case ON contents(CAST(intended AS TEXT) COLLATE NOCASE);
+            CREATE INDEX IF NOT EXISTS content_temporary_case ON contents(CAST(temporary AS TEXT) COLLATE NOCASE);")?;
+        let identity =
+            db.query_row("SELECT value FROM metadata WHERE key='identity'", [], |r| {
+                r.get(0)
+            })?;
         if create {
             // Persist the catalog's directory entry before accepting import work.
-            crate::publication::sync_directory(path.parent().context("catalog has no parent")?)?;
+            crate::publication::sync_ancestors(path.parent().context("catalog has no parent")?)?;
         }
         Ok(Self {
             db,
             path,
             _lock: lock,
+            staging_lock: None,
+            identity,
         })
+    }
+
+    /// Protect source roots across runs, including roots reused in a different role.
+    pub fn validate_paths(&self, config: &Config) -> Result<()> {
+        let source = normalize(&config.source)?;
+        let staging = normalize(&config.staging)?;
+        let overlaps = |a: &Path, b: &Path| a.starts_with(b) || b.starts_with(a);
+        for writable in [&config.destination, &config.catalog, &config.staging] {
+            ensure!(
+                !overlaps(&source, &normalize(writable)?),
+                "writable path overlaps source"
+            );
+        }
+        let mut stmt = self.db.prepare("SELECT source,staging FROM runs")?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let previous_source = normalize(&native_path(row.get(0)?))?;
+            let previous_stage = normalize(&native_path(row.get(1)?))?;
+            ensure!(
+                !overlaps(&source, &previous_stage),
+                "source overlaps staging from an earlier run: {}",
+                previous_stage.display()
+            );
+            ensure!(
+                !overlaps(&staging, &previous_source),
+                "staging overlaps source from an earlier run: {}",
+                previous_source.display()
+            );
+        }
+        Ok(())
+    }
+
+    pub fn prepare_staging(&mut self, config: &Config) -> Result<()> {
+        self.validate_paths(config)?;
+        if self
+            .staging_lock
+            .as_ref()
+            .is_some_and(|(path, _)| path == &config.staging)
+        {
+            return Ok(());
+        }
+        std::fs::create_dir_all(&config.staging)?;
+        let directory = File::open(&config.staging)?;
+        FileExt::try_lock_exclusive(&directory)
+            .context("staging directory is locked by another import")?;
+        self.staging_lock = Some((config.staging.clone(), directory));
+        Ok(())
+    }
+
+    pub fn stage_path(&self, config: &Config, run: i64, sequence: i64) -> PathBuf {
+        config.staging.join(format!(
+            ".unduplicator-{}-{run}-{sequence}.stage",
+            self.identity
+        ))
+    }
+
+    pub fn final_reserved(&self, path: &Path) -> Result<bool> {
+        Ok(self.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM contents WHERE CAST(intended AS TEXT)=CAST(?1 AS TEXT) COLLATE NOCASE)",
+            [path_bytes(path)],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Keyset iteration keeps recovery memory independent of catalog size.
+    pub fn next_recovery_content(&self, run: i64, after: i64) -> Result<Option<(i64, Content)>> {
+        Ok(self.db.query_row("SELECT digest,size,representative,intended,stage,temporary,state,date,provenance,rowid FROM contents
+            WHERE rowid>?2 AND EXISTS(SELECT 1 FROM source_files s WHERE s.digest=contents.digest AND s.run=?1)
+            ORDER BY rowid LIMIT 1", params![run,after], |r| Ok((r.get(9)?,content_row(r)?))).optional()?)
     }
 
     pub fn associate(&self, destination: &Path) -> Result<()> {
@@ -166,6 +247,7 @@ impl Catalog {
     }
 
     pub fn new_run(&self, config: &Config) -> Result<i64> {
+        self.validate_paths(config)?;
         self.associate(&config.destination)?;
         self.db.execute(
             "INSERT INTO runs(source,destination,staging,budget) VALUES(?1,?2,?3,?4)",
@@ -232,7 +314,7 @@ impl Catalog {
     }
     pub fn path_reserved(&self, path: &Path) -> Result<bool> {
         Ok(self.db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM contents WHERE intended=?1 OR temporary=?1)",
+            "SELECT EXISTS(SELECT 1 FROM contents WHERE CAST(intended AS TEXT)=CAST(?1 AS TEXT) COLLATE NOCASE OR CAST(temporary AS TEXT)=CAST(?1 AS TEXT) COLLATE NOCASE)",
             [path_bytes(path)],
             |r| r.get(0),
         )?)

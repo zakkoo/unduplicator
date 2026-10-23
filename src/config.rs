@@ -104,15 +104,5 @@ impl Config {
 }
 
 pub fn exiftool_preflight() -> Result<()> {
-    let output = std::process::Command::new("exiftool")
-        .arg("-ver")
-        .output()
-        .context(
-            "ExifTool is required; install perl-image-exiftool and ensure exiftool is on PATH",
-        )?;
-    ensure!(
-        output.status.success() && !output.stdout.is_empty(),
-        "ExifTool preflight failed"
-    );
-    Ok(())
+    crate::media::preflight(&std::sync::atomic::AtomicBool::new(false))
 }

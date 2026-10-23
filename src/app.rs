@@ -1,7 +1,7 @@
 use crate::{
     catalog::Catalog,
     cli::Command,
-    config::{Config, exiftool_preflight},
+    config::Config,
     disk::Gates,
     inventory::inventory,
     pipeline::{self, Counters, Observer},
@@ -53,7 +53,7 @@ pub fn execute(command: Command, stop: Arc<AtomicBool>) -> Result<()> {
         } => {
             let config =
                 Config::validate(&source, &destination, &catalog, &staging, staging_budget)?;
-            exiftool_preflight()?;
+            crate::media::preflight(&stop)?;
             let catalog = Catalog::open(&config.catalog, true)?;
             let run = catalog.new_run(&config)?;
             println!("Run ID: {run}");
@@ -86,6 +86,7 @@ pub fn execute(command: Command, stop: Arc<AtomicBool>) -> Result<()> {
     let gates = Gates::discover(&config.source, &config.destination, &config.staging);
     let result: Result<()> = (|| {
         if !verification_only {
+            catalog.prepare_staging(&config)?;
             inventory(&mut catalog, &config, run, &stop)?;
             let (symlinks, special): (i64, i64) = catalog.db.query_row(
                 "SELECT skipped_symlinks,skipped_special FROM runs WHERE id=?1",
@@ -97,7 +98,15 @@ pub fn execute(command: Command, stop: Arc<AtomicBool>) -> Result<()> {
                 catalog.totals(run)?.0,
                 catalog.totals(run)?.1
             );
-            recovery::reconcile(&mut catalog, &config, &stop, &counters, &gates, &observer)?;
+            recovery::reconcile(
+                &mut catalog,
+                &config,
+                run,
+                &stop,
+                &counters,
+                &gates,
+                &observer,
+            )?;
             pipeline::process(
                 &mut catalog,
                 &config,
@@ -123,8 +132,13 @@ pub fn execute(command: Command, stop: Arc<AtomicBool>) -> Result<()> {
         Ok(())
     })();
     if let Err(error) = &result {
-        catalog.error(run, &format!("{error:#}"))?;
-        let outcome = if catalog.phase(run)? == "verification-failed" {
+        if let Err(record_error) = catalog.error(run, &format!("{error:#}")) {
+            eprintln!("could not record run error: {record_error:#}");
+        }
+        let outcome = if catalog
+            .phase(run)
+            .is_ok_and(|phase| phase == "verification-failed")
+        {
             "verification-failed"
         } else {
             "unfinished"

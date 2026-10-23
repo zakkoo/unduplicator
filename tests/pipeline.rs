@@ -353,6 +353,7 @@ fn temporary_names_cannot_alias_final_names_or_delete_them_on_recovery() {
         unduplicator::recovery::reconcile(
             &mut cat,
             &cfg,
+            run,
             &AtomicBool::new(false),
             &counters,
             &gates(),

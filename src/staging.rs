@@ -13,6 +13,26 @@ use std::{
 };
 
 pub const MAX_RESERVATIONS: usize = 4;
+
+/// O_NONBLOCK prevents opening a substituted FIFO from hanging before validation.
+pub fn open_regular(path: &Path) -> Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = options
+        .open(path)
+        .with_context(|| format!("content read {}", path.display()))?;
+    ensure!(
+        file.metadata()?.is_file(),
+        "content is not a regular file: {}",
+        path.display()
+    );
+    Ok(file)
+}
 pub struct Budget {
     limit: u64,
     state: Mutex<(u64, usize, bool)>,
@@ -21,11 +41,14 @@ pub struct Budget {
 }
 impl Budget {
     pub fn new(limit: u64) -> Arc<Self> {
+        Self::with_retained(limit, 0)
+    }
+    pub fn with_retained(limit: u64, retained: u64) -> Arc<Self> {
         Arc::new(Self {
             limit,
-            state: Mutex::new((0, 0, false)),
+            state: Mutex::new((retained, 0, false)),
             changed: Condvar::new(),
-            peak: AtomicU64::new(0),
+            peak: AtomicU64::new(retained),
         })
     }
     pub fn reserve(self: &Arc<Self>, size: u64, stop: &AtomicBool) -> Result<Reservation> {
@@ -111,7 +134,7 @@ pub fn hash_with_progress(
     bytes: &AtomicU64,
     on_read: &mut dyn FnMut() -> Result<()>,
 ) -> Result<(String, u64)> {
-    let mut input = File::open(path).with_context(|| format!("content read {}", path.display()))?;
+    let mut input = open_regular(path)?;
     let mut output = stage
         .map(|path| OpenOptions::new().write(true).create_new(true).open(path))
         .transpose()?;

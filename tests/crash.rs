@@ -6,6 +6,7 @@ use unduplicator::{catalog::Catalog, staging};
 fn every_crash_window_recovers_without_overwrite_or_duplicate_copy() {
     for point in [
         "pending_commit",
+        "directory_created",
         "new_directory_sync",
         "partial_transfer",
         "file_sync",

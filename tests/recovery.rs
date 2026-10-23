@@ -39,7 +39,7 @@ fn validate_adopt_retry_conflict_and_completed_cleanup() {
         let run = cat.new_run(&cfg).unwrap();
         inventory(&mut cat, &cfg, run, &AtomicBool::new(false)).unwrap();
         std::fs::create_dir(&cfg.staging).unwrap();
-        let stage = cfg.staging.join(format!(".unduplicator-{run}-0.stage"));
+        let stage = cat.stage_path(&cfg, run, 0);
         let (digest, _) = staging::hash(
             &source.join("a"),
             Some(&stage),
@@ -68,7 +68,7 @@ fn validate_adopt_retry_conflict_and_completed_cleanup() {
         }
         let unrelated = cfg.staging.join("unrelated");
         std::fs::write(&unrelated, b"keep").unwrap();
-        let orphan = cfg.staging.join(format!(".unduplicator-{run}-999.stage"));
+        let orphan = cat.stage_path(&cfg, run, 999);
         std::fs::write(&orphan, b"").unwrap();
         let unknown = cfg.staging.join(".unduplicator-999-0.stage");
         std::fs::write(&unknown, b"keep").unwrap();
@@ -77,6 +77,7 @@ fn validate_adopt_retry_conflict_and_completed_cleanup() {
         let result = recovery::reconcile(
             &mut cat,
             &cfg,
+            run,
             &AtomicBool::new(false),
             &counters,
             &gates,
@@ -141,13 +142,30 @@ fn pending_copy_rejects_destination_symlink_until_it_is_removed() {
     let stop = AtomicBool::new(false);
     let counters = Counters::default();
     let gates = Gates::discover(&cfg.source, &cfg.destination, &cfg.staging);
-    let result = recovery::reconcile(&mut cat, &cfg, &stop, &counters, &gates, &pipeline::noop());
+    let result = recovery::reconcile(
+        &mut cat,
+        &cfg,
+        run,
+        &stop,
+        &counters,
+        &gates,
+        &pipeline::noop(),
+    );
     assert!(format!("{:#}", result.unwrap_err()).contains("symlink in destination directory"));
     assert_eq!(cat.done(run).unwrap(), 0);
     assert_eq!(std::fs::read_dir(&source).unwrap().count(), 1);
 
     std::fs::remove_file(cfg.destination.join("Other")).unwrap();
-    recovery::reconcile(&mut cat, &cfg, &stop, &counters, &gates, &pipeline::noop()).unwrap();
+    recovery::reconcile(
+        &mut cat,
+        &cfg,
+        run,
+        &stop,
+        &counters,
+        &gates,
+        &pipeline::noop(),
+    )
+    .unwrap();
     assert_eq!(cat.done(run).unwrap(), 1);
     assert_eq!(
         std::fs::read(cfg.destination.join("Other/a.txt")).unwrap(),
@@ -177,9 +195,7 @@ fn recovery_drains_full_budget_before_new_staging() {
     inventory(&mut cat, &cfg, run, &AtomicBool::new(false)).unwrap();
     std::fs::create_dir(&cfg.staging).unwrap();
     for row in cat.source_rows(run, false).unwrap().into_iter().take(2) {
-        let stage = cfg
-            .staging
-            .join(format!(".unduplicator-{run}-{}.stage", row.sequence));
+        let stage = cat.stage_path(&cfg, run, row.sequence);
         let (digest, _) = staging::hash(
             &source.join(&row.relative),
             Some(&stage),
@@ -195,6 +211,7 @@ fn recovery_drains_full_budget_before_new_staging() {
     recovery::reconcile(
         &mut cat,
         &cfg,
+        run,
         &AtomicBool::new(false),
         &counters,
         &gates,

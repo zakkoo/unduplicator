@@ -76,7 +76,9 @@ fn real_publication_preserves_conflicts_and_failure_keeps_pending() {
         let stage = cfg.staging.join("stage");
         std::fs::copy(source.join("file"), &stage).unwrap();
         let row = cat.source_rows(run, false).unwrap().remove(0);
-        let content = decide(&cat, &cfg, &row, &"a".repeat(64), Some(&stage)).unwrap();
+        use sha2::Digest;
+        let digest = format!("{:x}", sha2::Sha256::digest(b"original"));
+        let content = decide(&cat, &cfg, &row, &digest, Some(&stage)).unwrap();
         cat.claim(&row, &content).unwrap();
         if failure == Some("sqlite_commit") {
             cat.db.execute_batch("CREATE TRIGGER injected_commit_failure BEFORE UPDATE OF state ON contents BEGIN SELECT RAISE(FAIL,'injected SQLite commit failure'); END;").unwrap();
@@ -156,4 +158,36 @@ fn no_replace_and_unsupported_flush_are_explicit() {
     assert_eq!(std::fs::read(&b).unwrap(), b"b");
     assert!(publication::sync_directory(std::path::Path::new("/proc")).is_err());
     assert!(publication::platform_supported().is_ok());
+}
+
+#[test]
+fn same_size_corrupted_input_is_not_published() {
+    use sha2::Digest;
+    let temp = tempfile::tempdir().unwrap();
+    let stage = temp.path().join("stage");
+    std::fs::write(&stage, b"BBB").unwrap();
+    let content = Content {
+        digest: format!("{:x}", sha2::Sha256::digest(b"AAA")),
+        size: 3,
+        source: temp.path().join("source"),
+        intended: "Other/file".into(),
+        stage: Some(stage.clone()),
+        temporary: "Other/temp".into(),
+        complete: false,
+        date: None,
+        provenance: "unknown".into(),
+    };
+    let destination = temp.path().join("destination");
+    let error = publication::publish(
+        &content,
+        &destination,
+        &stage,
+        &AtomicBool::new(false),
+        &mut |_| Ok(()),
+        &mut |_| {},
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("digest differs"));
+    assert!(!destination.join(&content.intended).exists());
+    assert_eq!(std::fs::read(stage).unwrap(), b"BBB");
 }

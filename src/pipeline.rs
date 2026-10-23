@@ -2,7 +2,7 @@ use crate::{
     catalog::{Catalog, Content, Source},
     config::Config,
     disk::Gates,
-    naming, publication,
+    naming, publication, recovery,
     staging::{self, Budget, Reservation},
 };
 use anyhow::{Context, Result, ensure};
@@ -76,8 +76,15 @@ pub fn process(
     gates: Gates,
     observer: Observer,
 ) -> Result<()> {
-    std::fs::create_dir_all(&config.staging)?;
-    let budget = Budget::new(config.budget);
+    catalog.prepare_staging(config)?;
+    let retained = recovery::retained_bytes(config)?;
+    ensure!(
+        retained <= config.budget,
+        "retained staging files exceed this run's budget; resume their owning run or use a separate staging directory"
+    );
+    let capacity = config.budget - retained;
+    let budget = Budget::with_retained(config.budget, retained);
+    let identity = catalog.identity.clone();
     let (source_tx, source_rx) = mpsc::sync_channel::<Source>(2);
     let (copy_tx, copy_rx) = mpsc::sync_channel::<Job>(2);
     let (event_tx, event_rx) = mpsc::sync_channel::<Event>(4);
@@ -93,10 +100,10 @@ pub fn process(
                 if source_stop.load(Ordering::Relaxed) {
                     break;
                 }
-                let oversized = source.size > config.budget;
+                let oversized = source.size > capacity;
                 let stage = (!oversized).then(|| {
                     config.staging.join(format!(
-                        ".unduplicator-{}-{}.stage",
+                        ".unduplicator-{identity}-{}-{}.stage",
                         source.run, source.sequence
                     ))
                 });
@@ -251,7 +258,14 @@ pub fn process(
                         readers -= 1;
                         counters.observed.fetch_add(source.size, Ordering::Relaxed);
                         let content = gates.metadata(stage.is_none(), || {
-                            naming::decide(catalog, config, &source, &digest, stage.as_deref())
+                            naming::decide_with_stop(
+                                catalog,
+                                config,
+                                &source,
+                                &digest,
+                                stage.as_deref(),
+                                &stop,
+                            )
                         })?;
                         let unique = catalog.claim(&source, &content)?;
                         if unique {
@@ -264,12 +278,30 @@ pub fn process(
                             });
                         } else {
                             observer("duplicate_dependency")?;
+                            if !content.complete && !reservations.contains_key(&digest) {
+                                // An older run may own this pending digest. Use the freshly
+                                // hashed current source/stage without requiring its drive online.
+                                let mut retry = content.clone();
+                                retry.stage = stage.clone();
+                                retry.source = config.source.join(&source.relative);
+                                recovery::recover_one(
+                                    catalog, config, &retry, &stop, &counters, &gates, &observer,
+                                )?;
+                                publication::cleanup_stage(catalog, &content, &mut |name| {
+                                    observer(name)
+                                })?;
+                            }
                             if let Some(stage) = stage {
-                                std::fs::remove_file(stage)?;
+                                match std::fs::remove_file(stage) {
+                                    Ok(()) => {}
+                                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                                    Err(e) => return Err(e.into()),
+                                }
                             }
                             drop(reservation);
                             ensure!(
-                                content.complete || reservations.contains_key(&digest),
+                                catalog.content(&digest)?.is_some_and(|c| c.complete)
+                                    || reservations.contains_key(&digest),
                                 "pending content must be recovered before processing"
                             );
                         }
@@ -282,16 +314,20 @@ pub fn process(
                     }
                     Ok(Event::Failed(source, digest, error)) => {
                         if let Some(source) = source {
-                            catalog.db.execute(
+                            if let Err(record_error) = catalog.db.execute(
                                 "UPDATE source_files SET error=?1 WHERE run=?2 AND sequence=?3",
                                 params![error, run, source.sequence],
-                            )?;
+                            ) {
+                                eprintln!("could not record source error: {record_error:#}");
+                            }
                         }
                         if let Some(digest) = digest {
-                            catalog.db.execute(
+                            if let Err(record_error) = catalog.db.execute(
                                 "UPDATE contents SET error=?1 WHERE digest=?2",
                                 params![error, digest],
-                            )?;
+                            ) {
+                                eprintln!("could not record content error: {record_error:#}");
+                            }
                         }
                         anyhow::bail!("{error}");
                     }

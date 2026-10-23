@@ -4,7 +4,10 @@ use crate::{
     media, publication,
 };
 use anyhow::{Context, Result, ensure};
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::atomic::AtomicBool,
+};
 
 fn exists(path: &Path) -> Result<bool> {
     match path.symlink_metadata() {
@@ -15,14 +18,67 @@ fn exists(path: &Path) -> Result<bool> {
 }
 
 pub fn suffixed(path: &Path, digest: &str) -> Result<PathBuf> {
-    let mut name = path.file_stem().context("basename has no stem")?.to_owned();
-    name.push("-");
-    name.push(digest);
-    if let Some(extension) = path.extension() {
-        name.push(".");
-        name.push(extension);
+    suffixed_with_limit(path, digest, 255)
+}
+
+fn suffixed_with_limit(path: &Path, digest: &str, limit: usize) -> Result<PathBuf> {
+    use crate::catalog::{native_path, path_bytes};
+    let mut stem = path_bytes(Path::new(path.file_stem().context("basename has no stem")?));
+    let mut extension = path
+        .extension()
+        .map(|e| path_bytes(Path::new(e)))
+        .unwrap_or_default();
+    ensure!(
+        limit > digest.len() + 1,
+        "destination filename limit cannot hold a digest suffix"
+    );
+    let available = limit - digest.len() - 1;
+    // Keep at least one stem byte; unusually long extensions must also be shortened.
+    let extension_limit = available.saturating_sub(2);
+    truncate_name(&mut extension, extension_limit);
+    truncate_name(
+        &mut stem,
+        available
+            - if extension.is_empty() {
+                0
+            } else {
+                extension.len() + 1
+            },
+    );
+    stem.push(b'-');
+    stem.extend_from_slice(digest.as_bytes());
+    if !extension.is_empty() {
+        stem.push(b'.');
+        stem.extend(extension);
     }
-    Ok(path.with_file_name(name))
+    Ok(path.with_file_name(native_path(stem)))
+}
+
+fn truncate_name(bytes: &mut Vec<u8>, limit: usize) {
+    let mut end = bytes.len().min(limit);
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+    }
+    bytes.truncate(end);
+}
+
+fn name_limit(path: &Path) -> Result<usize> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let existing = path
+            .ancestors()
+            .find(|p| p.is_dir())
+            .context("destination has no existing ancestor")?;
+        let native = std::ffi::CString::new(existing.as_os_str().as_bytes())?;
+        let limit = unsafe { libc::pathconf(native.as_ptr(), libc::_PC_NAME_MAX) };
+        if limit > 0 {
+            return Ok(limit as usize);
+        }
+    }
+    Ok(255)
 }
 
 /// Called by the coordinator in recorded inventory order, before copy dispatch.
@@ -34,12 +90,31 @@ pub fn decide(
     digest: &str,
     stage: Option<&Path>,
 ) -> Result<Content> {
+    decide_with_stop(
+        catalog,
+        config,
+        source,
+        digest,
+        stage,
+        &AtomicBool::new(false),
+    )
+}
+
+pub fn decide_with_stop(
+    catalog: &Catalog,
+    config: &Config,
+    source: &Source,
+    digest: &str,
+    stage: Option<&Path>,
+    stop: &AtomicBool,
+) -> Result<Content> {
     if let Some(content) = catalog.content(digest)? {
         return Ok(content);
     }
     let original = config.source.join(&source.relative);
     let metadata = if media::is_media(&source.relative) {
-        let (date, diagnostic) = media::extract_metadata(stage.unwrap_or(&original));
+        let (date, diagnostic) =
+            media::extract_metadata_cancellable(stage.unwrap_or(&original), stop)?;
         if let Some(diagnostic) = diagnostic {
             eprintln!("metadata diagnostic: {diagnostic}");
         }
@@ -59,8 +134,12 @@ pub fn decide(
             .destination
             .join(intended.parent().context("destination has no parent")?),
     )?;
-    if catalog.path_reserved(&intended)? || exists(&config.destination.join(&intended))? {
-        intended = suffixed(&intended, digest)?;
+    let limit = name_limit(&config.destination.join(&intended))?;
+    if crate::catalog::path_bytes(Path::new(basename)).len() > limit
+        || catalog.path_reserved(&intended)?
+        || exists(&config.destination.join(&intended))?
+    {
+        intended = suffixed_with_limit(&intended, digest, limit)?;
         ensure!(
             !catalog.path_reserved(&intended)? && !exists(&config.destination.join(&intended))?,
             "destination name conflict: {}",

@@ -41,7 +41,7 @@ before checking; source symlinks will not be followed during inventory.
 Resume accepts only the catalog, positive run ID, and optional verification;
 it will reuse stored roots and budget.
 
-The catalog uses schema version 2, SQLite WAL with NORMAL synchronization, and an
+The catalog uses schema version 2, SQLite WAL with FULL synchronization, and an
 exclusive import/resume/verify command lock. Concurrent write commands and a different destination are
 rejected. Retain the catalog and its lock file. Inventory records native Unix
 path bytes, original birth/modification times, extensions and sizes in batches
@@ -205,37 +205,49 @@ reservations and disconnects bounded queues so workers can stop without deadlock
 - Keep destination naming and duplicate representative selection deterministic, independent of worker completion order.
 - Index SQLite digest lookups and batch progress updates into short transactions. Track staged, pending, and completed content so interrupted work can resume. Use the finalization order below when committing completed copies, including batched commits.
 
+Staging names include a persistent catalog identity. An exclusive directory lock
+prevents simultaneous writers from different catalogs sharing a staging root.
+All retained regular files count against the staging budget; files larger than
+the remaining capacity use the oversized-file fallback. Historical source and
+staging roots are checked for overlap before inventory or recovery, so old staging
+cannot accidentally become a new source.
+
 ## Copy finalization and crash recovery
 
 The current publication adapter supports Linux. It publishes through an atomic
 same-filesystem hard link from the exclusive destination temporary file, then
 unlinks the temporary name. Existing final names are never replaced. Finished
 content is synced before publication; new directories and their parents are
-synced on creation, and the final's parent directory is synced before catalog
-completion. Unsupported hard links or directory fsync,
+synced on creation, and the final's parent and all its ancestors are synced before
+catalog completion. Existing ancestors are flushed too, covering a restart after
+mkdir but before its directory entry was flushed. Unsupported hard links or directory fsync,
 and failed file/directory/catalog operations, report errors and preserve pending
 work. Validated on this Linux host with real temporary-directory files; other
 platforms are explicitly rejected. Successful flush calls still depend on the
 filesystem/device honoring them. Operation-order and process-crash tests do not
 prove survival of actual power loss.
 
-Catalog creation also flushes newly created parent directories and the catalog
-directory entry before accepting import work. These are startup operations;
-normal imports retain the existing transaction and flush frequency.
+Catalog startup flushes the catalog directory and its ancestors before accepting
+import work. FULL synchronization and ancestor flushes add storage latency in
+exchange for stronger commit ordering.
 
 1. Persist the pending digest, source reference, and intended destination path in SQLite before starting the destination copy.
-2. Write to a temporary file on the destination filesystem. Flush the completed file to durable storage, then atomically publish it at the final path without replacing an existing file. Flush the affected directory entries, including newly created parent directories, before proceeding.
+2. Write to a temporary file on the destination filesystem, checking size and SHA-256 during the transfer before publishing. Flush the completed file to durable storage, then atomically publish it at the final path without replacing an existing file. Flush the affected directory entries, including newly created parent directories, before proceeding.
 3. Durably commit the completed state in SQLite, then release the staging file. Duplicates linked to this content become complete only after this commit.
 
 On restart, reconcile pending records with destination files and staging files. If the final destination file already exists, check its digest before adopting it as complete; this handles a crash after publication but before the SQLite commit. Validate recovered staging or temporary content before reuse, and retry incomplete copies from valid staging or the unchanged source. Never overwrite a conflicting final file. Failed copies and their dependent duplicates remain unfinished and must be reported; the run is complete only when every inventoried file has a completed destination copy.
 
-Recovery drains existing pending work before allowing new staging reservations,
-including when recovered stages fill the budget. Matching finals are flushed and
+Recovery streams records for the selected run before allowing new staging
+reservations, including when recovered stages fill the budget. Unrelated unfinished
+runs do not block a new import. A new duplicate of older pending content can supply
+a validated stage or source while retaining the original representative metadata. Matching finals are flushed and
 adopted without another copy. Complete temporaries are reused; partial temporaries
 are removed and retried from validated staging or a fully validated representative
 source. Leftover stages for committed rows are cleaned without recopying. Orphan
-cleanup removes only catalog-owned staging names or recorded redundant temporary
-paths; unknown/unrelated names and destination final paths are preserved.
+cleanup removes only staging names owned by this catalog and selected run, or
+recorded redundant temporary paths. Unknown names, other runs, and destination
+final paths are preserved. Recorded legacy stages remain recoverable; unreferenced
+legacy stages without catalog identity are preserved.
 
 A small recovery trial:
 
@@ -270,7 +282,8 @@ timestamps remain recorded in inventory, but neither source nor staging
 filesystem timestamps determine capture dates.
 
 ExifTool is invoked read-only on unique staged media; oversized media uses the
-original source. Valid EXIF DateTimeOriginal wins, then XMP DateCreated,
+original source. Queries and preflight are cancellable, have a 30-second timeout,
+and reap a stalled child before returning an error. Valid EXIF DateTimeOriginal wins, then XMP DateCreated,
 QuickTime CreationDate, then embedded CreateDate. Filesystem tags returned by
 ExifTool are excluded. Missing or invalid dates silently permit fallback;
 process failures and malformed ExifTool JSON retain their diagnostics. Calendar
@@ -295,7 +308,11 @@ are preserved. Existing catalog entries are reused without reclassification.
 The first inventory-ordered claimant represents each new digest; existing
 digests keep their representative, path, date and provenance. A reserved or
 existing basename receives `stem-FULL_LOWERCASE_SHA256.extension`. If that name
-also conflicts, the tool reports an error. Native Unix basenames are retained.
+also conflicts, the tool reports an error. Names are bounded by the destination
+component limit: long stems and, if necessary, extensions are shortened while
+retaining the full digest suffix. UTF-8 truncation preserves character boundaries;
+other native Unix names remain byte-preserving. Reservations conservatively
+treat ASCII case variants as collisions, including pending names.
 Catalog reservations include temporary names. Temporary names receive a
 deterministic numeric suffix when needed so they never alias a reserved final
 name, including a source basename resembling the tool's temporary namespace.
@@ -376,3 +393,7 @@ statistics. Version-1 catalogs migrate
 without losing existing records the next time import/resume/verify opens them;
 viewing alone does not migrate the database. Older version-1 binaries cannot
 open a migrated version-2 catalog.
+
+Verification opens destination files without following leaf symlinks and rejects
+special files, including FIFOs, without blocking. These failures leave verification
+unsuccessful.

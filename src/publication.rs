@@ -68,11 +68,20 @@ pub fn check_parent(root: &Path, parent: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Only the final's parent changes on link/unlink; every ancestor was synced
-/// when `create_parents` created it, so one directory flush is sufficient.
+/// Existing ancestors may come from an interrupted mkdir before its parent flush.
+/// Flush the chain again before recording durable completion.
 pub fn sync_parents(parent: &Path, root: &Path) -> Result<()> {
     check_parent(root, parent)?;
-    sync_directory(parent)
+    sync_ancestors(parent)
+}
+
+pub(crate) fn sync_ancestors(parent: &Path) -> Result<()> {
+    for directory in parent.ancestors() {
+        if !directory.as_os_str().is_empty() {
+            sync_directory(directory)?;
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn create_parents(parent: &Path, hook: &mut Hook<'_>) -> Result<()> {
@@ -84,6 +93,7 @@ pub(crate) fn create_parents(parent: &Path, hook: &mut Hook<'_>) -> Result<()> {
     }
     std::fs::create_dir(parent)
         .with_context(|| format!("create directory {}", parent.display()))?;
+    hook("directory_created")?;
     sync_directory(parent)?;
     if let Some(ancestor) = parent.parent() {
         sync_directory(ancestor)?;
@@ -122,8 +132,9 @@ pub fn publish(
         .create_new(true)
         .open(&temporary)
         .with_context(|| format!("create exclusive temporary {}", temporary.display()))?;
-    let mut source =
-        File::open(input).with_context(|| format!("read copy input {}", input.display()))?;
+    let mut source = crate::staging::open_regular(input)?;
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
     let mut buffer = vec![0; BUFFER_SIZE];
     let mut copied = 0;
     loop {
@@ -133,6 +144,7 @@ pub fn publish(
             break;
         }
         output.write_all(&buffer[..count])?;
+        hasher.update(&buffer[..count]);
         copied += count as u64;
         bytes(count as u64);
         hook("partial_transfer")?;
@@ -140,6 +152,10 @@ pub fn publish(
     ensure!(
         copied == content.size,
         "copy input size differs from recorded size"
+    );
+    ensure!(
+        format!("{:x}", hasher.finalize()) == content.digest,
+        "copy input digest differs from recorded digest"
     );
     output.sync_all().context("destination file flush failed")?;
     hook("file_sync")?;
@@ -160,7 +176,7 @@ pub fn publish_existing_temporary(
     let temporary = root.join(&content.temporary);
     let final_path = root.join(&content.intended);
     check_parent(root, final_path.parent().context("final has no parent")?)?;
-    File::open(&temporary)?
+    crate::staging::open_regular(&temporary)?
         .sync_all()
         .context("temporary file flush failed")?;
     hook("file_sync")?;

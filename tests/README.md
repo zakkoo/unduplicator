@@ -117,7 +117,7 @@ cargo test --test recovery
 cargo test --features test-failpoints --test crash
 ```
 
-Recovery tests and child-process tests cover twelve import crash windows:
+Recovery tests and child-process tests cover thirteen import crash windows:
 after pending commit, new directory sync, partial transfer, file sync, publication,
 directory sync, before and after catalog commit, before and after stage cleanup,
 and before and after report commit. Inputs exceed one transfer buffer so
@@ -227,3 +227,26 @@ Report tests cover zero-byte files, reused content, historical performance
 statistics, legacy report text, missing cached text, and a failed report save
 that preserves completed work. Filesystem flush ordering is tested separately;
 these tests do not simulate a physical power cut or failing storage hardware.
+
+## Audit regressions
+
+On 2026-10-22, `cargo test --locked` passed 61 tests and
+`cargo test --locked --features test-failpoints` passed 66 tests. Formatting,
+Clippy with warnings denied (both configurations), and diff whitespace checks passed.
+
+`tests/regressions.rs` covers shared staging locks and catalog namespaces, retained
+staging budgets, historical source/staging overlap, symlink and FIFO verification,
+unavailable older runs, duplicate recovery across a second crash, long native
+filenames, ASCII case collisions, error-reporting failures, metadata cancellation,
+and recovery with 10,000 unrelated pending records. Publication tests also reject
+same-size input corruption. Media unit tests exercise timeout, cancellation, EOF,
+blocked input pipes, and child cleanup.
+
+`tests/support/io_faults.c` injects EIO and ENOSPC at libc read, write, and sync
+boundaries in child processes. Tests check preserved sources, unfinished work,
+and successful retries, including a failed ancestor flush after an interrupted
+mkdir. The harness requires a C compiler and Linux `/proc`.
+
+These tests do not physically exhaust a filesystem, cut power, or validate a
+native case-insensitive filesystem. SQLite reservations cover ASCII case variants;
+Unicode case folding is not modeled.

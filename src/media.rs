@@ -57,105 +57,252 @@ const EXIFTOOL_ARGS: [&str; 8] = [
     "-CreateDate",
 ];
 
-/// One long-lived `exiftool -stay_open` process; spawning one per file costs
-/// more than reading the file.
+const METADATA_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const MAX_METADATA_BYTES: usize = 1024 * 1024;
+
+/// Nonblocking pipes let cancellation and the deadline cover partial lines and
+/// a child that stops consuming requests, as well as one that stops responding.
 struct Daemon {
-    stdin: std::process::ChildStdin,
-    stdout: std::io::BufReader<std::process::ChildStdout>,
-    _child: std::process::Child,
+    stdin: Option<std::process::ChildStdin>,
+    stdout: std::process::ChildStdout,
+    child: std::process::Child,
 }
 static DAEMON: std::sync::Mutex<Option<Daemon>> = std::sync::Mutex::new(None);
 
+impl Drop for Daemon {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+#[cfg(unix)]
+fn nonblocking(pipe: &impl std::os::fd::AsRawFd) -> std::io::Result<()> {
+    let fd = pipe.as_raw_fd();
+    // The descriptor belongs to the live child pipe for both fcntl calls.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 impl Daemon {
-    fn spawn(executable: &std::ffi::OsStr) -> std::io::Result<Self> {
-        let mut child = std::process::Command::new(executable)
-            .args(["-stay_open", "True", "-@", "-"])
+    fn spawn(executable: &std::ffi::OsStr, one_shot: Option<&Path>) -> std::io::Result<Self> {
+        let mut command = std::process::Command::new(executable);
+        if let Some(path) = one_shot {
+            command.args(EXIFTOOL_ARGS).arg(path);
+        } else {
+            command.args(["-stay_open", "True", "-@", "-"]);
+        }
+        Self::from_command(command, one_shot.is_none())
+    }
+
+    fn from_command(mut command: std::process::Command, persistent: bool) -> std::io::Result<Self> {
+        let mut child = command
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
             .spawn()?;
-        Ok(Self {
-            stdin: child.stdin.take().unwrap(),
-            stdout: std::io::BufReader::new(child.stdout.take().unwrap()),
-            _child: child,
-        })
-    }
-    fn query(&mut self, path: &Path) -> std::io::Result<Vec<u8>> {
-        use std::io::{BufRead, Write};
-        let mut request = Vec::new();
-        for arg in EXIFTOOL_ARGS {
-            request.extend_from_slice(arg.as_bytes());
-            request.push(b'\n');
+        let stdin = child.stdin.take().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let process = Self {
+            stdin: persistent.then_some(stdin),
+            stdout,
+            child,
+        };
+        #[cfg(unix)]
+        {
+            nonblocking(&process.stdout)?;
+            if let Some(stdin) = &process.stdin {
+                nonblocking(stdin)?;
+            }
         }
-        request.extend_from_slice(&path_bytes(path));
-        request.extend_from_slice(b"\n-execute\n");
-        self.stdin.write_all(&request)?;
-        self.stdin.flush()?;
+        Ok(process)
+    }
+
+    fn query(
+        &mut self,
+        path: &Path,
+        stop: &std::sync::atomic::AtomicBool,
+        timeout: std::time::Duration,
+    ) -> std::io::Result<Vec<u8>> {
+        use std::io::{Read, Write};
+        let deadline = std::time::Instant::now() + timeout;
+        let check = || {
+            if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "interrupted during metadata extraction",
+                ))
+            } else if std::time::Instant::now() >= deadline {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "ExifTool metadata timeout",
+                ))
+            } else {
+                Ok(())
+            }
+        };
+        if let Some(stdin) = &mut self.stdin {
+            let mut request = Vec::new();
+            for arg in EXIFTOOL_ARGS {
+                request.extend_from_slice(arg.as_bytes());
+                request.push(b'\n');
+            }
+            request.extend_from_slice(&path_bytes(path));
+            request.extend_from_slice(b"\n-execute\n");
+            let mut remaining = request.as_slice();
+            while !remaining.is_empty() {
+                check()?;
+                match stdin.write(remaining) {
+                    Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
+                    Ok(count) => remaining = &remaining[count..],
+                    Err(e)
+                        if e.kind() == std::io::ErrorKind::WouldBlock
+                            || e.kind() == std::io::ErrorKind::Interrupted =>
+                    {
+                        std::thread::sleep(std::time::Duration::from_millis(20))
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+        }
         let mut output = Vec::new();
         loop {
-            let mut line = Vec::new();
-            if self.stdout.read_until(b'\n', &mut line)? == 0 {
-                return Err(std::io::ErrorKind::UnexpectedEof.into());
+            check()?;
+            let mut buffer = [0u8; 8192];
+            match self.stdout.read(&mut buffer) {
+                Ok(0) if self.stdin.is_none() => loop {
+                    check()?;
+                    if let Some(status) = self.child.try_wait()? {
+                        if status.success() {
+                            return Ok(output);
+                        }
+                        return Err(std::io::Error::other(format!(
+                            "ExifTool exited with {status}"
+                        )));
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                },
+                Ok(0) => return Err(std::io::ErrorKind::UnexpectedEof.into()),
+                Ok(count) => {
+                    output.extend_from_slice(&buffer[..count]);
+                    if output.len() > MAX_METADATA_BYTES {
+                        return Err(std::io::Error::other(
+                            "ExifTool metadata response exceeds 1 MiB",
+                        ));
+                    }
+                    if self.stdin.is_some() {
+                        for marker in [b"{ready}\n".as_slice(), b"{ready}\r\n"] {
+                            if output.ends_with(marker) {
+                                let start = output.len() - marker.len();
+                                if start == 0 || output[start - 1] == b'\n' {
+                                    output.truncate(start);
+                                    return Ok(output);
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::Interrupted =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(20))
+                }
+                Err(e) => return Err(e),
             }
-            if line.strip_suffix(b"\n").map(|l| l.strip_suffix(b"\r").unwrap_or(l)) == Some(b"{ready}") {
-                return Ok(output);
-            }
-            output.extend_from_slice(&line);
         }
     }
 }
 
-pub fn extract_metadata(path: &Path) -> (Option<SelectedDate>, Option<String>) {
-    let executable = std::ffi::OsStr::new("exiftool");
-    if path_bytes(path).contains(&b'\n') {
-        return extract_metadata_using(path, executable);
-    }
-    let mut daemon = DAEMON.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    if daemon.is_none() {
-        match Daemon::spawn(executable) {
-            Ok(spawned) => *daemon = Some(spawned),
-            Err(error) => return (None, Some(format!("ExifTool {}: {error}", path.display()))),
+pub fn preflight(stop: &std::sync::atomic::AtomicBool) -> anyhow::Result<()> {
+    use anyhow::Context;
+    let mut command = std::process::Command::new("exiftool");
+    command.arg("-ver");
+    let mut process = Daemon::from_command(command, false).context(
+        "ExifTool is required; install perl-image-exiftool and ensure exiftool is on PATH",
+    )?;
+    let output = process.query(Path::new(""), stop, METADATA_TIMEOUT)?;
+    anyhow::ensure!(!output.is_empty(), "ExifTool preflight failed");
+    Ok(())
+}
+
+fn metadata_result(
+    path: &Path,
+    result: std::io::Result<Vec<u8>>,
+) -> anyhow::Result<(Option<SelectedDate>, Option<String>)> {
+    match result {
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::Interrupted | std::io::ErrorKind::TimedOut
+            ) =>
+        {
+            Err(error.into())
         }
-    }
-    match daemon.as_mut().unwrap().query(path) {
-        Ok(output) if output.is_empty() => (
-            None,
-            Some(format!("ExifTool {}: no output", path.display())),
-        ),
-        Ok(output) => match metadata_json(&output) {
+        Err(error) => Ok((None, Some(format!("ExifTool {}: {error}", path.display())))),
+        Ok(output) => Ok(match metadata_json(&output) {
             Ok(date) => (date, None),
             Err(error) => (None, Some(error)),
-        },
-        Err(error) => {
-            *daemon = None;
-            (None, Some(format!("ExifTool {}: {error}", path.display())))
+        }),
+    }
+}
+
+pub fn extract_metadata_cancellable(
+    path: &Path,
+    stop: &std::sync::atomic::AtomicBool,
+) -> anyhow::Result<(Option<SelectedDate>, Option<String>)> {
+    let executable = std::ffi::OsStr::new("exiftool");
+    if path_bytes(path).contains(&b'\n') {
+        let result = Daemon::spawn(executable, Some(path))
+            .and_then(|mut process| process.query(path, stop, METADATA_TIMEOUT));
+        return metadata_result(path, result);
+    }
+    let mut daemon = loop {
+        match DAEMON.try_lock() {
+            Ok(daemon) => break daemon,
+            Err(std::sync::TryLockError::Poisoned(error)) => break error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                anyhow::ensure!(
+                    !stop.load(std::sync::atomic::Ordering::Relaxed),
+                    "interrupted waiting for metadata process"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        }
+    };
+    if daemon.is_none() {
+        match Daemon::spawn(executable, None) {
+            Ok(spawned) => *daemon = Some(spawned),
+            Err(error) => return metadata_result(path, Err(error)),
         }
     }
+    let result = daemon.as_mut().unwrap().query(path, stop, METADATA_TIMEOUT);
+    if result.is_err() {
+        *daemon = None;
+    }
+    metadata_result(path, result)
+}
+
+pub fn extract_metadata(path: &Path) -> (Option<SelectedDate>, Option<String>) {
+    extract_metadata_cancellable(path, &std::sync::atomic::AtomicBool::new(false))
+        .unwrap_or_else(|error| (None, Some(format!("{error:#}"))))
 }
 
 pub fn extract_metadata_using(
     path: &Path,
     executable: &std::ffi::OsStr,
 ) -> (Option<SelectedDate>, Option<String>) {
-    let output = std::process::Command::new(executable)
-        .args(EXIFTOOL_ARGS)
-        .arg(path)
-        .output();
-    match output {
-        Err(error) => (None, Some(format!("ExifTool {}: {error}", path.display()))),
-        Ok(output) if !output.status.success() => (
-            None,
-            Some(format!(
-                "ExifTool {}: {}",
-                path.display(),
-                String::from_utf8_lossy(&output.stderr).trim()
-            )),
-        ),
-        Ok(output) => match metadata_json(&output.stdout) {
-            Ok(date) => (date, None),
-            Err(error) => (None, Some(error)),
-        },
-    }
+    let result = Daemon::spawn(executable, Some(path)).and_then(|mut process| {
+        process.query(
+            path,
+            &std::sync::atomic::AtomicBool::new(false),
+            METADATA_TIMEOUT,
+        )
+    });
+    metadata_result(path, result).unwrap_or_else(|error| (None, Some(format!("{error:#}"))))
 }
 
 pub fn is_media(path: &Path) -> bool {
@@ -528,5 +675,99 @@ mod tests {
             let native = std::ffi::OsStr::from_bytes(b"IMG_\xff123.jpg");
             assert_eq!(filename_pattern(Path::new(native)), "Other");
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod process_tests {
+    use super::*;
+    use std::{
+        os::unix::fs::PermissionsExt,
+        sync::atomic::{AtomicBool, Ordering},
+        time::{Duration, Instant},
+    };
+
+    fn executable(root: &Path, script: &str) -> std::path::PathBuf {
+        let path = root.join("exiftool");
+        std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        path
+    }
+
+    #[test]
+    fn stalled_partial_response_and_blocked_request_are_bounded_and_reaped() {
+        for (script, long_request, one_shot) in [
+            ("printf '[{'; exec sleep 30", false, false),
+            ("exec sleep 30", true, false),
+            ("exec sleep 30", false, true),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let executable = executable(temp.path(), script);
+            let path = if long_request {
+                std::path::PathBuf::from("x".repeat(128 * 1024))
+            } else {
+                "file.jpg".into()
+            };
+            let mut process =
+                Daemon::spawn(executable.as_os_str(), one_shot.then_some(path.as_path())).unwrap();
+            let pid = process.child.id();
+            let started = Instant::now();
+            let error = process
+                .query(&path, &AtomicBool::new(false), Duration::from_millis(100))
+                .unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+            drop(process);
+            assert!(started.elapsed() < Duration::from_secs(2));
+            assert_eq!(unsafe { libc::kill(pid as i32, 0) }, -1);
+            assert_eq!(
+                std::io::Error::last_os_error().raw_os_error(),
+                Some(libc::ESRCH)
+            );
+        }
+    }
+
+    #[test]
+    fn cancellation_interrupts_a_live_child_and_eof_restarts_cleanly() {
+        let temp = tempfile::tempdir().unwrap();
+        let executable = executable(temp.path(), "exec sleep 30");
+        let mut process = Daemon::spawn(executable.as_os_str(), None).unwrap();
+        let stop = AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                std::thread::sleep(Duration::from_millis(50));
+                stop.store(true, Ordering::Relaxed);
+            });
+            assert_eq!(
+                process
+                    .query(Path::new("file.jpg"), &stop, Duration::from_secs(5))
+                    .unwrap_err()
+                    .kind(),
+                std::io::ErrorKind::Interrupted
+            );
+        });
+        drop(process);
+        std::fs::write(&executable, "#!/bin/sh\nprintf '[{'; exit 1\n").unwrap();
+        let mut dead = Daemon::spawn(executable.as_os_str(), None).unwrap();
+        assert!(
+            dead.query(
+                Path::new("file.jpg"),
+                &AtomicBool::new(false),
+                Duration::from_secs(1)
+            )
+            .is_err()
+        );
+        drop(dead);
+        std::fs::write(&executable, "#!/bin/sh\nwhile IFS= read -r line; do if [ \"$line\" = '-execute' ]; then printf '[{}]\\n{ready}\\n'; fi; done\n").unwrap();
+        let mut restarted = Daemon::spawn(executable.as_os_str(), None).unwrap();
+        assert_eq!(
+            restarted
+                .query(
+                    Path::new("file.jpg"),
+                    &AtomicBool::new(false),
+                    Duration::from_secs(1)
+                )
+                .unwrap(),
+            b"[{}]\n"
+        );
     }
 }
